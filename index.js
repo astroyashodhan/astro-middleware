@@ -38,29 +38,56 @@ app.post("/webhook", async (req, res) => {
     const dataArray = data.data || [];
 
     // Extract all fields
+    const name       = extractField(dataArray, "name");
     const birthDay   = extractField(dataArray, "user_birth_day");
     const birthMonth = extractField(dataArray, "user_birth_month");
     const birthYear  = extractField(dataArray, "user_birth_year");
+    const tob        = extractField(dataArray, "user_birth_time");
+    const birthPlace = extractField(dataArray, "user_birth_place");
+    const topic      = extractField(dataArray, "prediction_choice");
 
+    // Wait until ALL required fields are collected (birth_place is the last one)
+    if (!name || !birthDay || !birthMonth || !birthYear || !tob || !birthPlace || !topic) {
+      addLog("WAITING", {
+        reason: "Not all fields collected yet",
+        collected: {
+          name: !!name,
+          birthDay: !!birthDay,
+          birthMonth: !!birthMonth,
+          birthYear: !!birthYear,
+          tob: !!tob,
+          birthPlace: !!birthPlace,
+          topic: !!topic
+        }
+      });
+      return res.status(200).json({ status: "waiting" });
+    }
+
+    // Build DOB string
     const monthNames = {
       "1": "January", "2": "February", "3": "March", "4": "April",
       "5": "May", "6": "June", "7": "July", "8": "August",
       "9": "September", "10": "October", "11": "November", "12": "December"
     };
-    const monthName = monthNames[birthMonth] || birthMonth;
-    const dob = `${birthDay} ${monthName} ${birthYear}`;
+    const dob = `${birthDay} ${monthNames[birthMonth] || birthMonth} ${birthYear}`;
 
+
+    // Split phone into country code and local number
+    // e.g. +919019497839 → country_code: +91, phone: 9019497839
+    const fullPhone = data.customer_number || "";
+    const phoneMatch = fullPhone.match(/^(\+\d{1,3})(\d+)$/);
+    const countryCode = phoneMatch ? phoneMatch[1] : "";
+    const phoneNumber = phoneMatch ? phoneMatch[2] : fullPhone;
+    // Only send required fields to Make.com
     const makePayload = {
-      name:          extractField(dataArray, "name"),
-      dob:           dob,
-      birth_place:   extractField(dataArray, "user_birth_place"),
-      tob:           extractField(dataArray, "user_birth_time"),
-      topic:         extractField(dataArray, "prediction_choice"),
-      phone_full:    data.customer_number,
-      customer_name: data.customer_name,
-      customer_id:   data.customer_id,
-      workflow_id:   data.workflow_id,
-      timestamp:     body.timestamp
+      name:        name,
+      dob:         dob,
+      birth_place: birthPlace,
+      tob:         tob,
+      topic:       topic,
+      country_code: countryCode,
+      phone:        phoneNumber,
+      phone_full:   fullPhone
     };
 
     addLog("FORWARDED_TO_MAKE", makePayload);
@@ -83,7 +110,7 @@ app.get("/", (req, res) => {
   const rows = logs.map(log => `
     <tr>
       <td>${log.time}</td>
-      <td><span class="badge ${log.type === 'ERROR' ? 'error' : log.type === 'FORWARDED_TO_MAKE' ? 'success' : 'info'}">${log.type}</span></td>
+      <td><span class="badge ${log.type === "ERROR" ? "error" : log.type === "FORWARDED_TO_MAKE" ? "success" : log.type === "WAITING" ? "waiting" : "info"}">${log.type}</span></td>
       <td><pre>${JSON.stringify(log.data, null, 2)}</pre></td>
     </tr>
   `).join("");
@@ -103,10 +130,11 @@ app.get("/", (req, res) => {
         td { padding: 10px; border-bottom: 1px solid #222; vertical-align: top; font-size: 12px; }
         pre { margin: 0; white-space: pre-wrap; word-break: break-all; max-width: 700px; }
         .badge { padding: 3px 8px; border-radius: 4px; font-size: 11px; font-weight: bold; }
-        .error { background: #7f1d1d; color: #fca5a5; }
+        .error   { background: #7f1d1d; color: #fca5a5; }
         .success { background: #14532d; color: #86efac; }
-        .info { background: #1e3a5f; color: #93c5fd; }
-        .status { color: #86efac; font-size: 13px; margin-bottom: 20px; }
+        .waiting { background: #78350f; color: #fcd34d; }
+        .info    { background: #1e3a5f; color: #93c5fd; }
+        .status  { color: #86efac; font-size: 13px; margin-bottom: 20px; }
       </style>
     </head>
     <body>
