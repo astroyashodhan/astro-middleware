@@ -126,17 +126,7 @@ app.post("/ask", async (req, res) => {
     const body = req.body;
     addLog("ASK_RECEIVED", body);
 
-    // Read phone directly from Interakt's raw payload
-    const phone_full = body?.customer_number 
-      || body?.data?.customer_number 
-      || body?.contact?.phone
-      || body?.phone
-      || '';
-
-    if (!phone_full) {
-      addLog("ASK_ERROR", { reason: "phone_full empty", body });
-      return;
-    }
+    const phone_full = body?.pf || '';
 
     await axios.post(
       'https://hook.eu1.make.com/168u4w0lu9f7huxpqesu9xg2dsu4ou98',
@@ -150,7 +140,6 @@ app.post("/ask", async (req, res) => {
     addLog("ASK_ERROR", { message: err.message });
   }
 });
-
 // ─── Live dashboard ───────────────────────────────────────────────────────────
 app.get("/", (req, res) => {
   const rows = logs.map(log => `
