@@ -181,7 +181,27 @@ app.get("/", (req, res) => {
     </html>
   `);
 });
+app.post('/ask', async (req, res) => {
+  res.sendStatus(200);
 
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  try {
+    const body = req.body;
+
+    const country_code = body?.cc || '';
+    const phone_number = body?.ph || '';
+    const phone_full   = body?.pf || '';
+
+    await fetch('https://hook.eu1.make.com/168u4w0lu9f7huxpqesu9xg2dsu4ou98', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        country_code,
+        phone_number,
+        phone_full
+      })
+    });
+
+  } catch (err) {
+    console.error('ASK route error:', err);
+  }
 });
