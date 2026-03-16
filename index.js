@@ -4,10 +4,10 @@ const axios = require("axios");
 const app = express();
 app.use(express.json());
 
-// S1 — Free prediction (existing, fallback)
+// S1 — Free prediction (fallback for new users)
 const MAKE_WEBHOOK_URL = process.env.MAKE_WEBHOOK_URL;
 
-// S5 — ASK Gatekeeper ₹299 (new — add this in Railway Variables)
+// S5 — ASK Gatekeeper ₹299 (paid/returning users)
 const MAKE_S5_WEBHOOK_URL = process.env.MAKE_S5_WEBHOOK_URL;
 
 const PORT = process.env.PORT || 8080;
@@ -26,6 +26,17 @@ function extractField(dataArray, traitName) {
   return item ? item.answer.message : null;
 }
 
+// ── Detect if this is a returning/paid user message ───────────────────────────
+// When user_trait_name is null on ALL items, Interakt is NOT collecting fields.
+// This means the user is an existing user responding to a prompt (e.g. "Call astr").
+// In this case, skip field collection and forward straight to S5.
+function isReturningUser(dataArray) {
+  if (!dataArray || dataArray.length === 0) return false;
+  return dataArray.every(
+    (d) => !d.question || d.question.user_trait_name === null
+  );
+}
+
 app.post("/webhook", async (req, res) => {
   try {
     const body = req.body;
@@ -38,7 +49,42 @@ app.post("/webhook", async (req, res) => {
 
     const data = body.data;
     const dataArray = data.data || [];
+    const fullPhone = data.customer_number || "";
+    const customerName = data.customer_name || "";
 
+    // ── RETURNING USER DETECTED (user_trait_name is null) ─────────────────────
+    // Forward straight to S5 with phone + their answer message
+    if (isReturningUser(dataArray)) {
+      const userAnswer = dataArray[0]?.answer?.message || "";
+      const stepMessage = dataArray[0]?.question?.message || "";
+
+      const s5Payload = {
+        phone_full: fullPhone,
+        customer_name: customerName,
+        user_message: userAnswer,
+        step_message: stepMessage,
+        is_returning: true
+      };
+
+      addLog("RETURNING_USER_DETECTED", {
+        phone: fullPhone,
+        name: customerName,
+        answer: userAnswer
+      });
+
+      if (MAKE_S5_WEBHOOK_URL) {
+        const s5Response = await axios.post(MAKE_S5_WEBHOOK_URL, s5Payload, {
+          headers: { "Content-Type": "application/json" }
+        });
+        addLog("FORWARDED_TO_S5", { status: s5Response.status, payload: s5Payload });
+        return res.status(200).json({ status: "success_s5_returning", forwarded: s5Payload });
+      }
+
+      addLog("S5_NOT_SET", { warning: "MAKE_S5_WEBHOOK_URL not configured" });
+      return res.status(200).json({ status: "s5_not_configured" });
+    }
+
+    // ── NEW USER — collect birth detail fields ─────────────────────────────────
     const name       = extractField(dataArray, "name");
     const birthDay   = extractField(dataArray, "user_birth_day");
     const birthMonth = extractField(dataArray, "user_birth_month");
@@ -86,7 +132,6 @@ app.post("/webhook", async (req, res) => {
       "+66","+90","+44","+58","+84","+91","+1"
     ];
 
-    const fullPhone = data.customer_number || "";
     let countryCode = "";
     let phoneNumber = fullPhone;
     for (const code of COUNTRY_CODES) {
@@ -101,28 +146,11 @@ app.post("/webhook", async (req, res) => {
       name, dob, birth_place: birthPlace, tob, topic,
       country_code: countryCode,
       phone: phoneNumber,
-      phone_full: fullPhone
+      phone_full: fullPhone,
+      is_returning: false
     };
 
-    // ── ROUTING LOGIC ─────────────────────────────────────────────────────────
-    // If MAKE_S5_WEBHOOK_URL is set → send to S5 (ASK Gatekeeper)
-    // S5 will internally check is_paid in the data store and route accordingly:
-    //   Paid user  → ask question flow + AI answer
-    //   Unpaid     → show ₹299 paywall message
-    //
-    // If MAKE_S5_WEBHOOK_URL is NOT set → fallback to S1 (original free flow)
-    // ─────────────────────────────────────────────────────────────────────────
-
-    if (MAKE_S5_WEBHOOK_URL) {
-      addLog("FORWARDED_TO_S5", makePayload);
-      const s5Response = await axios.post(MAKE_S5_WEBHOOK_URL, makePayload, {
-        headers: { "Content-Type": "application/json" }
-      });
-      addLog("S5_RESPONSE", { status: s5Response.status });
-      return res.status(200).json({ status: "success_s5", forwarded: makePayload });
-    }
-
-    // Fallback → S1
+    // New users with all fields → S1 (free prediction flow)
     addLog("FORWARDED_TO_MAKE", makePayload);
     const makeResponse = await axios.post(MAKE_WEBHOOK_URL, makePayload, {
       headers: { "Content-Type": "application/json" }
@@ -141,11 +169,12 @@ app.get("/", (req, res) => {
     <tr>
       <td>${log.time}</td>
       <td><span class="badge ${
-        log.type === "ERROR"             ? "error"   :
-        log.type === "FORWARDED_TO_S5"   ? "s5"      :
-        log.type === "S5_RESPONSE"       ? "s5"      :
-        log.type === "FORWARDED_TO_MAKE" ? "success" :
-        log.type === "WAITING"           ? "waiting" :
+        log.type === "ERROR"                  ? "error"    :
+        log.type === "FORWARDED_TO_S5"        ? "s5"       :
+        log.type === "RETURNING_USER_DETECTED"? "s5"       :
+        log.type === "FORWARDED_TO_MAKE"      ? "success"  :
+        log.type === "WAITING"                ? "waiting"  :
+        log.type === "S5_NOT_SET"             ? "error"    :
         "info"
       }">${log.type}</span></td>
       <td><pre>${JSON.stringify(log.data, null, 2)}</pre></td>
@@ -181,8 +210,8 @@ app.get("/", (req, res) => {
       <h1>🔮 Astro Middleware — Live Logs</h1>
       <p class="status">✅ Server running — auto-refreshes every 5 seconds</p>
       <div class="config">
-        <span>S1 Webhook:</span> ${MAKE_WEBHOOK_URL ? '✅ Set (fallback)' : '❌ Not set'} &nbsp;&nbsp;
-        <span>S5 Webhook:</span> ${MAKE_S5_WEBHOOK_URL ? '✅ Set — routing all users to S5' : '⚠️ Not set — falling back to S1'}
+        <span>S1 Webhook:</span> ${MAKE_WEBHOOK_URL ? '✅ Set (new users)' : '❌ Not set'} &nbsp;&nbsp;
+        <span>S5 Webhook:</span> ${MAKE_S5_WEBHOOK_URL ? '✅ Set (returning/paid users)' : '⚠️ Not set'}
       </div>
       <p>Showing last ${logs.length} events</p>
       <table>
