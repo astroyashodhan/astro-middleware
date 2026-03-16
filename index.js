@@ -4,15 +4,7 @@ const axios = require("axios");
 const app = express();
 app.use(express.json());
 
-// S1 — Free prediction (new users)
 const MAKE_WEBHOOK_URL = process.env.MAKE_WEBHOOK_URL;
-
-// S5 — ASK Gatekeeper ₹299 (returning users asking a question)
-const MAKE_S5_WEBHOOK_URL = process.env.MAKE_S5_WEBHOOK_URL;
-
-// S6 — NEXT Gateway ₹49 (users who type "next" or tomorrow keywords)
-const MAKE_S6_WEBHOOK_URL = process.env.MAKE_S6_WEBHOOK_URL;
-
 const PORT = process.env.PORT || 8080;
 
 const logs = [];
@@ -22,35 +14,13 @@ function addLog(type, data) {
   if (logs.length > 20) logs.pop();
 }
 
+// FIXED: always picks LAST answer — handles user corrections/re-entries
 function extractField(dataArray, traitName) {
-  const item = dataArray.find(
+  const items = dataArray.filter(
     (d) => d.question && d.question.user_trait_name === traitName
   );
-  return item ? item.answer.message : null;
-}
-
-// Detect returning user — user_trait_name is null on all items
-function isReturningUser(dataArray) {
-  if (!dataArray || dataArray.length === 0) return false;
-  return dataArray.every(
-    (d) => !d.question || d.question.user_trait_name === null
-  );
-}
-
-// Detect S6 keywords — matches all Interakt trigger keywords
-function isNextKeyword(message) {
-  if (!message) return false;
-  const msg = message.trim().toLowerCase();
-  const keywords = [
-    "next",
-    "tomorrow prediction",
-    "tomorrow horoscope",
-    "paid 49",
-    "tomorrow",
-    "next day",
-    "detailed"
-  ];
-  return keywords.some(k => msg.includes(k));
+  if (!items.length) return null;
+  return items[items.length - 1].answer.message;
 }
 
 app.post("/webhook", async (req, res) => {
@@ -63,63 +33,9 @@ app.post("/webhook", async (req, res) => {
       return res.status(200).json({ status: "ignored" });
     }
 
-    const data         = body.data;
-    const dataArray    = data.data || [];
-    const fullPhone    = data.customer_number || "";
-    const customerName = data.customer_name || "";
+    const data = body.data;
+    const dataArray = data.data || [];
 
-    // ── RETURNING USER (user_trait_name is null) ──────────────────────────────
-    if (isReturningUser(dataArray)) {
-      const userAnswer  = dataArray[0]?.answer?.message || "";
-      const stepMessage = dataArray[0]?.question?.message || "";
-
-      // User typed a "next/tomorrow" keyword → S6 (send ₹49 payment link)
-      if (isNextKeyword(userAnswer)) {
-        const s6Payload = {
-          phone_full:    fullPhone,
-          customer_name: customerName,
-          user_message:  userAnswer,
-          trigger:       "next"
-        };
-
-        addLog("NEXT_DETECTED", { phone: fullPhone, name: customerName, message: userAnswer });
-
-        if (MAKE_S6_WEBHOOK_URL) {
-          const s6Response = await axios.post(MAKE_S6_WEBHOOK_URL, s6Payload, {
-            headers: { "Content-Type": "application/json" }
-          });
-          addLog("FORWARDED_TO_S6", { status: s6Response.status, payload: s6Payload });
-          return res.status(200).json({ status: "success_s6", forwarded: s6Payload });
-        }
-
-        addLog("S6_NOT_SET", { warning: "MAKE_S6_WEBHOOK_URL not configured" });
-        return res.status(200).json({ status: "s6_not_configured" });
-      }
-
-      // Any other returning message → S5 (₹299 ask astrologer)
-      const s5Payload = {
-        phone_full:    fullPhone,
-        customer_name: customerName,
-        user_message:  userAnswer,
-        step_message:  stepMessage,
-        is_returning:  true
-      };
-
-      addLog("RETURNING_USER_DETECTED", { phone: fullPhone, name: customerName, answer: userAnswer });
-
-      if (MAKE_S5_WEBHOOK_URL) {
-        const s5Response = await axios.post(MAKE_S5_WEBHOOK_URL, s5Payload, {
-          headers: { "Content-Type": "application/json" }
-        });
-        addLog("FORWARDED_TO_S5", { status: s5Response.status, payload: s5Payload });
-        return res.status(200).json({ status: "success_s5", forwarded: s5Payload });
-      }
-
-      addLog("S5_NOT_SET", { warning: "MAKE_S5_WEBHOOK_URL not configured" });
-      return res.status(200).json({ status: "s5_not_configured" });
-    }
-
-    // ── NEW USER — collect birth detail fields ────────────────────────────────
     const name       = extractField(dataArray, "name");
     const birthDay   = extractField(dataArray, "user_birth_day");
     const birthMonth = extractField(dataArray, "user_birth_month");
@@ -139,10 +55,17 @@ app.post("/webhook", async (req, res) => {
       return res.status(200).json({ status: "waiting" });
     }
 
+    // ✅ Validate birth year is between 1935 and 2026
+    const yearNum = parseInt(birthYear, 10);
+    if (isNaN(yearNum) || yearNum < 1935 || yearNum > 2026) {
+      addLog("INVALID_YEAR", { birthYear, reason: "Must be between 1935 and 2026" });
+      return res.status(200).json({ status: "invalid_year", birthYear });
+    }
+
     const monthNames = {
-      "1": "January",  "2": "February", "3": "March",    "4": "April",
-      "5": "May",      "6": "June",     "7": "July",     "8": "August",
-      "9": "September","10": "October", "11": "November","12": "December"
+      "1": "January", "2": "February", "3": "March", "4": "April",
+      "5": "May", "6": "June", "7": "July", "8": "August",
+      "9": "September", "10": "October", "11": "November", "12": "December"
     };
     const dob = `${birthDay} ${monthNames[birthMonth] || birthMonth} ${birthYear}`;
 
@@ -155,7 +78,7 @@ app.post("/webhook", async (req, res) => {
       "+506","+385","+357","+420","+253","+593","+503","+372","+251","+679",
       "+358","+241","+220","+995","+233","+502","+224","+592","+509","+504",
       "+852","+354","+353","+972","+962","+996","+856","+371","+961","+266",
-      "+231","+218","+370","+352","+853","+261","+265","+960","+223","+456",
+      "+231","+218","+370","+352","+853","+261","+265","+960","+223","+356",
       "+222","+230","+373","+377","+976","+382","+212","+258","+264","+977",
       "+505","+227","+234","+850","+968","+507","+595","+351","+974","+250",
       "+966","+221","+381","+248","+232","+421","+386","+252","+597","+963",
@@ -167,6 +90,7 @@ app.post("/webhook", async (req, res) => {
       "+66","+90","+44","+58","+84","+91","+1"
     ];
 
+    const fullPhone = data.customer_number || "";
     let countryCode = "";
     let phoneNumber = fullPhone;
     for (const code of COUNTRY_CODES) {
@@ -180,16 +104,15 @@ app.post("/webhook", async (req, res) => {
     const makePayload = {
       name, dob, birth_place: birthPlace, tob, topic,
       country_code: countryCode,
-      phone:        phoneNumber,
-      phone_full:   fullPhone,
-      is_returning: false
+      phone: phoneNumber,
+      phone_full: fullPhone
     };
 
-    // New users with all fields → S1
     addLog("FORWARDED_TO_MAKE", makePayload);
     const makeResponse = await axios.post(MAKE_WEBHOOK_URL, makePayload, {
       headers: { "Content-Type": "application/json" }
     });
+
     addLog("MAKE_RESPONSE", { status: makeResponse.status });
     return res.status(200).json({ status: "success", forwarded: makePayload });
 
@@ -204,16 +127,9 @@ app.get("/", (req, res) => {
     <tr>
       <td>${log.time}</td>
       <td><span class="badge ${
-        log.type === "ERROR"                   ? "error"   :
-        log.type === "FORWARDED_TO_S5"         ? "s5"      :
-        log.type === "RETURNING_USER_DETECTED" ? "s5"      :
-        log.type === "FORWARDED_TO_S6"         ? "s6"      :
-        log.type === "NEXT_DETECTED"           ? "s6"      :
-        log.type === "FORWARDED_TO_MAKE"       ? "success" :
-        log.type === "WAITING"                 ? "waiting" :
-        log.type === "S5_NOT_SET"              ? "error"   :
-        log.type === "S6_NOT_SET"              ? "error"   :
-        "info"
+        log.type === "ERROR" ? "error" :
+        log.type === "FORWARDED_TO_MAKE" ? "success" :
+        log.type === "WAITING" || log.type === "INVALID_YEAR" ? "waiting" : "info"
       }">${log.type}</span></td>
       <td><pre>${JSON.stringify(log.data, null, 2)}</pre></td>
     </tr>
@@ -226,33 +142,24 @@ app.get("/", (req, res) => {
       <title>Astro Middleware — Live Logs</title>
       <meta http-equiv="refresh" content="5">
       <style>
-        body    { font-family: monospace; background: #0f0f0f; color: #e0e0e0; padding: 20px; }
-        h1      { color: #a78bfa; }
-        p       { color: #888; font-size: 13px; }
-        table   { width: 100%; border-collapse: collapse; }
-        th      { text-align: left; padding: 10px; background: #1a1a2e; color: #a78bfa; }
-        td      { padding: 10px; border-bottom: 1px solid #222; vertical-align: top; font-size: 12px; }
-        pre     { margin: 0; white-space: pre-wrap; word-break: break-all; max-width: 700px; }
-        .badge  { padding: 3px 8px; border-radius: 4px; font-size: 11px; font-weight: bold; }
-        .error  { background: #7f1d1d; color: #fca5a5; }
-        .success{ background: #14532d; color: #86efac; }
-        .s5     { background: #4c1d95; color: #c4b5fd; }
-        .s6     { background: #065f46; color: #6ee7b7; }
-        .waiting{ background: #78350f; color: #fcd34d; }
-        .info   { background: #1e3a5f; color: #93c5fd; }
-        .status { color: #86efac; font-size: 13px; margin-bottom: 20px; }
-        .config { background: #1a1a2e; padding: 12px 16px; border-radius: 8px; margin-bottom: 20px; font-size: 12px; line-height: 2.2; }
-        .config span { color: #a78bfa; font-weight: bold; }
+        body { font-family: monospace; background: #0f0f0f; color: #e0e0e0; padding: 20px; }
+        h1 { color: #a78bfa; }
+        p { color: #888; font-size: 13px; }
+        table { width: 100%; border-collapse: collapse; }
+        th { text-align: left; padding: 10px; background: #1a1a2e; color: #a78bfa; }
+        td { padding: 10px; border-bottom: 1px solid #222; vertical-align: top; font-size: 12px; }
+        pre { margin: 0; white-space: pre-wrap; word-break: break-all; max-width: 700px; }
+        .badge { padding: 3px 8px; border-radius: 4px; font-size: 11px; font-weight: bold; }
+        .error   { background: #7f1d1d; color: #fca5a5; }
+        .success { background: #14532d; color: #86efac; }
+        .waiting { background: #78350f; color: #fcd34d; }
+        .info    { background: #1e3a5f; color: #93c5fd; }
+        .status  { color: #86efac; font-size: 13px; margin-bottom: 20px; }
       </style>
     </head>
     <body>
       <h1>🔮 Astro Middleware — Live Logs</h1>
       <p class="status">✅ Server running — auto-refreshes every 5 seconds</p>
-      <div class="config">
-        <span>S1 Webhook:</span> ${MAKE_WEBHOOK_URL    ? '✅ Set — new users → free prediction' : '❌ Not set'}<br>
-        <span>S5 Webhook:</span> ${MAKE_S5_WEBHOOK_URL ? '✅ Set — returning users → ₹299 ask astrologer' : '⚠️ Not set'}<br>
-        <span>S6 Webhook:</span> ${MAKE_S6_WEBHOOK_URL ? '✅ Set — NEXT/tomorrow keywords → ₹49 payment' : '⚠️ Not set'}
-      </div>
       <p>Showing last ${logs.length} events</p>
       <table>
         <thead><tr><th>Time</th><th>Type</th><th>Data</th></tr></thead>
