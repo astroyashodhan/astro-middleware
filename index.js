@@ -10,7 +10,7 @@ const MAKE_WEBHOOK_URL = process.env.MAKE_WEBHOOK_URL;
 // S5 — ASK Gatekeeper ₹299 (returning users asking a question)
 const MAKE_S5_WEBHOOK_URL = process.env.MAKE_S5_WEBHOOK_URL;
 
-// S6 — NEXT Gateway ₹49 (users who type "next")
+// S6 — NEXT Gateway ₹49 (users who type "next" or tomorrow keywords)
 const MAKE_S6_WEBHOOK_URL = process.env.MAKE_S6_WEBHOOK_URL;
 
 const PORT = process.env.PORT || 8080;
@@ -37,10 +37,20 @@ function isReturningUser(dataArray) {
   );
 }
 
-// Detect if user typed "next"
+// Detect S6 keywords — matches all Interakt trigger keywords
 function isNextKeyword(message) {
   if (!message) return false;
-  return message.trim().toLowerCase() === "next";
+  const msg = message.trim().toLowerCase();
+  const keywords = [
+    "next",
+    "tomorrow prediction",
+    "tomorrow horoscope",
+    "paid 49",
+    "tomorrow",
+    "next day",
+    "detailed"
+  ];
+  return keywords.some(k => msg.includes(k));
 }
 
 app.post("/webhook", async (req, res) => {
@@ -53,9 +63,9 @@ app.post("/webhook", async (req, res) => {
       return res.status(200).json({ status: "ignored" });
     }
 
-    const data        = body.data;
-    const dataArray   = data.data || [];
-    const fullPhone   = data.customer_number || "";
+    const data         = body.data;
+    const dataArray    = data.data || [];
+    const fullPhone    = data.customer_number || "";
     const customerName = data.customer_name || "";
 
     // ── RETURNING USER (user_trait_name is null) ──────────────────────────────
@@ -63,7 +73,7 @@ app.post("/webhook", async (req, res) => {
       const userAnswer  = dataArray[0]?.answer?.message || "";
       const stepMessage = dataArray[0]?.question?.message || "";
 
-      // User typed "NEXT" → S6 (send ₹49 payment link)
+      // User typed a "next/tomorrow" keyword → S6 (send ₹49 payment link)
       if (isNextKeyword(userAnswer)) {
         const s6Payload = {
           phone_full:    fullPhone,
@@ -72,7 +82,7 @@ app.post("/webhook", async (req, res) => {
           trigger:       "next"
         };
 
-        addLog("NEXT_DETECTED", { phone: fullPhone, name: customerName });
+        addLog("NEXT_DETECTED", { phone: fullPhone, name: customerName, message: userAnswer });
 
         if (MAKE_S6_WEBHOOK_URL) {
           const s6Response = await axios.post(MAKE_S6_WEBHOOK_URL, s6Payload, {
@@ -241,7 +251,7 @@ app.get("/", (req, res) => {
       <div class="config">
         <span>S1 Webhook:</span> ${MAKE_WEBHOOK_URL    ? '✅ Set — new users → free prediction' : '❌ Not set'}<br>
         <span>S5 Webhook:</span> ${MAKE_S5_WEBHOOK_URL ? '✅ Set — returning users → ₹299 ask astrologer' : '⚠️ Not set'}<br>
-        <span>S6 Webhook:</span> ${MAKE_S6_WEBHOOK_URL ? '✅ Set — NEXT keyword → ₹49 payment link' : '⚠️ Not set'}
+        <span>S6 Webhook:</span> ${MAKE_S6_WEBHOOK_URL ? '✅ Set — NEXT/tomorrow keywords → ₹49 payment' : '⚠️ Not set'}
       </div>
       <p>Showing last ${logs.length} events</p>
       <table>
