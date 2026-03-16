@@ -7,7 +7,6 @@ app.use(express.json());
 const MAKE_WEBHOOK_URL = process.env.MAKE_WEBHOOK_URL;
 const PORT = process.env.PORT || 8080;
 
-// In-memory log of last 20 incoming payloads
 const logs = [];
 
 function addLog(type, data) {
@@ -15,7 +14,6 @@ function addLog(type, data) {
   if (logs.length > 20) logs.pop();
 }
 
-// Helper: extract answer by user_trait_name from data array
 function extractField(dataArray, traitName) {
   const item = dataArray.find(
     (d) => d.question && d.question.user_trait_name === traitName
@@ -23,12 +21,12 @@ function extractField(dataArray, traitName) {
   return item ? item.answer.message : null;
 }
 
+// ─── ROUTE 1: Main prediction webhook ───────────────────────────────────────
 app.post("/webhook", async (req, res) => {
   try {
     const body = req.body;
     addLog("RECEIVED", body);
 
-    // Only process workflow_response_update events
     if (body.type !== "workflow_response_update") {
       addLog("IGNORED", { reason: "Not workflow_response_update", type: body.type });
       return res.status(200).json({ status: "ignored" });
@@ -37,7 +35,6 @@ app.post("/webhook", async (req, res) => {
     const data = body.data;
     const dataArray = data.data || [];
 
-    // Extract all fields
     const name       = extractField(dataArray, "name");
     const birthDay   = extractField(dataArray, "user_birth_day");
     const birthMonth = extractField(dataArray, "user_birth_month");
@@ -46,24 +43,17 @@ app.post("/webhook", async (req, res) => {
     const birthPlace = extractField(dataArray, "user_birth_place");
     const topic      = extractField(dataArray, "prediction_choice");
 
-    // Wait until ALL required fields are collected (birth_place is the last one)
     if (!name || !birthDay || !birthMonth || !birthYear || !tob || !birthPlace || !topic) {
       addLog("WAITING", {
         reason: "Not all fields collected yet",
         collected: {
-          name: !!name,
-          birthDay: !!birthDay,
-          birthMonth: !!birthMonth,
-          birthYear: !!birthYear,
-          tob: !!tob,
-          birthPlace: !!birthPlace,
-          topic: !!topic
+          name: !!name, birthDay: !!birthDay, birthMonth: !!birthMonth,
+          birthYear: !!birthYear, tob: !!tob, birthPlace: !!birthPlace, topic: !!topic
         }
       });
       return res.status(200).json({ status: "waiting" });
     }
 
-    // Build DOB string
     const monthNames = {
       "1": "January", "2": "February", "3": "March", "4": "April",
       "5": "May", "6": "June", "7": "July", "8": "August",
@@ -71,8 +61,6 @@ app.post("/webhook", async (req, res) => {
     };
     const dob = `${birthDay} ${monthNames[birthMonth] || birthMonth} ${birthYear}`;
 
-
-    // Split phone using known country codes (longest match first)
     const COUNTRY_CODES = [
       "+1242","+1246","+1264","+1268","+1284","+1340","+1345","+1441","+1473",
       "+1649","+1664","+1670","+1671","+1684","+1758","+1767","+1784","+1809",
@@ -88,7 +76,6 @@ app.post("/webhook", async (req, res) => {
       "+968","+507","+595","+351","+974","+250","+966","+221","+381","+248",
       "+232","+421","+386","+252","+597","+963","+886","+992","+255","+216",
       "+993","+256","+380","+598","+998","+967","+260","+263",
-      "+358","+354","+353","+972","+420","+351","+381","+385","+386","+387",
       "+971","+966","+965","+974","+973","+968","+964","+962","+961","+960",
       "+880","+855","+856","+852","+853","+886","+977","+975","+976",
       "+994","+995","+996","+992","+993","+998",
@@ -96,10 +83,9 @@ app.post("/webhook", async (req, res) => {
       "+20","+33","+49","+30","+36","+62","+98","+39","+81","+254",
       "+60","+52","+31","+64","+47","+92","+63","+48","+40","+7",
       "+27","+82","+34","+94","+46","+41","+66","+90","+44","+58",
-      "+84","+91","+62","+55","+56","+51","+57","+63","+64","+65",
-      "+66","+81","+82","+84","+86","+90","+92","+94","+95","+98",
-      "+1"
+      "+84","+91","+1"
     ];
+
     const fullPhone = data.customer_number || "";
     let countryCode = "";
     let phoneNumber = fullPhone;
@@ -110,20 +96,15 @@ app.post("/webhook", async (req, res) => {
         break;
       }
     }
-    // Only send required fields to Make.com
+
     const makePayload = {
-      name:        name,
-      dob:         dob,
-      birth_place: birthPlace,
-      tob:         tob,
-      topic:       topic,
+      name, dob, birth_place: birthPlace, tob, topic,
       country_code: countryCode,
-      phone:        phoneNumber,
-      phone_full:   fullPhone
+      phone: phoneNumber,
+      phone_full: fullPhone
     };
 
     addLog("FORWARDED_TO_MAKE", makePayload);
-
     const makeResponse = await axios.post(MAKE_WEBHOOK_URL, makePayload, {
       headers: { "Content-Type": "application/json" }
     });
@@ -137,12 +118,37 @@ app.post("/webhook", async (req, res) => {
   }
 });
 
-// Live dashboard
+// ─── ROUTE 2: ASK Gatekeeper ─────────────────────────────────────────────────
+app.post("/ask", async (req, res) => {
+  res.sendStatus(200);
+
+  try {
+    const body = req.body;
+    addLog("ASK_RECEIVED", body);
+
+    const country_code = body?.cc || '';
+    const phone_number = body?.ph || '';
+    const phone_full   = body?.pf || '';
+
+    await axios.post(
+      'https://hook.eu1.make.com/168u4w0lu9f7huxpqesu9xg2dsu4ou98',
+      { country_code, phone_number, phone_full },
+      { headers: { "Content-Type": "application/json" } }
+    );
+
+    addLog("ASK_FORWARDED", { country_code, phone_number, phone_full });
+
+  } catch (err) {
+    addLog("ASK_ERROR", { message: err.message });
+  }
+});
+
+// ─── Live dashboard ───────────────────────────────────────────────────────────
 app.get("/", (req, res) => {
   const rows = logs.map(log => `
     <tr>
       <td>${log.time}</td>
-      <td><span class="badge ${log.type === "ERROR" ? "error" : log.type === "FORWARDED_TO_MAKE" ? "success" : log.type === "WAITING" ? "waiting" : "info"}">${log.type}</span></td>
+      <td><span class="badge ${log.type === "ERROR" || log.type === "ASK_ERROR" ? "error" : log.type === "FORWARDED_TO_MAKE" || log.type === "ASK_FORWARDED" ? "success" : log.type === "WAITING" ? "waiting" : "info"}">${log.type}</span></td>
       <td><pre>${JSON.stringify(log.data, null, 2)}</pre></td>
     </tr>
   `).join("");
@@ -175,33 +181,14 @@ app.get("/", (req, res) => {
       <p>Showing last ${logs.length} events</p>
       <table>
         <thead><tr><th>Time</th><th>Type</th><th>Data</th></tr></thead>
-        <tbody>${rows || '<tr><td colspan="3" style="color:#888">No events yet. Waiting for Interakt webhook...</td></tr>'}</tbody>
+        <tbody>${rows || '<tr><td colspan="3" style="color:#888">No events yet. Waiting for webhook...</td></tr>'}</tbody>
       </table>
     </body>
     </html>
   `);
 });
-app.post('/ask', async (req, res) => {
-  res.sendStatus(200);
 
-  try {
-    const body = req.body;
-
-    const country_code = body?.cc || '';
-    const phone_number = body?.ph || '';
-    const phone_full   = body?.pf || '';
-
-    await fetch('https://hook.eu1.make.com/168u4w0lu9f7huxpqesu9xg2dsu4ou98', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        country_code,
-        phone_number,
-        phone_full
-      })
-    });
-
-  } catch (err) {
-    console.error('ASK route error:', err);
-  }
+// ─── Start server ─────────────────────────────────────────────────────────────
+app.listen(PORT, () => {
+  console.log(`🚀 Astro middleware running on port ${PORT}`);
 });
