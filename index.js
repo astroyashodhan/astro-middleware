@@ -126,17 +126,15 @@ app.post("/ask", async (req, res) => {
     const body = req.body;
     addLog("ASK_RECEIVED", body);
 
-    const country_code = body?.cc || '';
-    const phone_number = body?.ph || '';
-    const phone_full   = body?.pf || '';
+    const phone_full = body?.pf || '';
 
     await axios.post(
       'https://hook.eu1.make.com/168u4w0lu9f7huxpqesu9xg2dsu4ou98',
-      { country_code, phone_number, phone_full },
+      { phone_full },
       { headers: { "Content-Type": "application/json" } }
     );
 
-    addLog("ASK_FORWARDED", { country_code, phone_number, phone_full });
+    addLog("ASK_FORWARDED", { phone_full });
 
   } catch (err) {
     addLog("ASK_ERROR", { message: err.message });
