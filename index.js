@@ -4,7 +4,12 @@ const axios = require("axios");
 const app = express();
 app.use(express.json());
 
+// S1 — Free prediction (existing, fallback)
 const MAKE_WEBHOOK_URL = process.env.MAKE_WEBHOOK_URL;
+
+// S5 — ASK Gatekeeper ₹299 (new — add this in Railway Variables)
+const MAKE_S5_WEBHOOK_URL = process.env.MAKE_S5_WEBHOOK_URL;
+
 const PORT = process.env.PORT || 8080;
 
 const logs = [];
@@ -69,7 +74,7 @@ app.post("/webhook", async (req, res) => {
       "+506","+385","+357","+420","+253","+593","+503","+372","+251","+679",
       "+358","+241","+220","+995","+233","+502","+224","+592","+509","+504",
       "+852","+354","+353","+972","+962","+996","+856","+371","+961","+266",
-      "+231","+218","+370","+352","+853","+261","+265","+960","+223","+356",
+      "+231","+218","+370","+352","+853","+261","+265","+960","+223","+456",
       "+222","+230","+373","+377","+976","+382","+212","+258","+264","+977",
       "+505","+227","+234","+850","+968","+507","+595","+351","+974","+250",
       "+966","+221","+381","+248","+232","+421","+386","+252","+597","+963",
@@ -99,11 +104,29 @@ app.post("/webhook", async (req, res) => {
       phone_full: fullPhone
     };
 
+    // ── ROUTING LOGIC ─────────────────────────────────────────────────────────
+    // If MAKE_S5_WEBHOOK_URL is set → send to S5 (ASK Gatekeeper)
+    // S5 will internally check is_paid in the data store and route accordingly:
+    //   Paid user  → ask question flow + AI answer
+    //   Unpaid     → show ₹299 paywall message
+    //
+    // If MAKE_S5_WEBHOOK_URL is NOT set → fallback to S1 (original free flow)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    if (MAKE_S5_WEBHOOK_URL) {
+      addLog("FORWARDED_TO_S5", makePayload);
+      const s5Response = await axios.post(MAKE_S5_WEBHOOK_URL, makePayload, {
+        headers: { "Content-Type": "application/json" }
+      });
+      addLog("S5_RESPONSE", { status: s5Response.status });
+      return res.status(200).json({ status: "success_s5", forwarded: makePayload });
+    }
+
+    // Fallback → S1
     addLog("FORWARDED_TO_MAKE", makePayload);
     const makeResponse = await axios.post(MAKE_WEBHOOK_URL, makePayload, {
       headers: { "Content-Type": "application/json" }
     });
-
     addLog("MAKE_RESPONSE", { status: makeResponse.status });
     return res.status(200).json({ status: "success", forwarded: makePayload });
 
@@ -117,7 +140,14 @@ app.get("/", (req, res) => {
   const rows = logs.map(log => `
     <tr>
       <td>${log.time}</td>
-      <td><span class="badge ${log.type === "ERROR" ? "error" : log.type === "FORWARDED_TO_MAKE" ? "success" : log.type === "WAITING" ? "waiting" : "info"}">${log.type}</span></td>
+      <td><span class="badge ${
+        log.type === "ERROR"             ? "error"   :
+        log.type === "FORWARDED_TO_S5"   ? "s5"      :
+        log.type === "S5_RESPONSE"       ? "s5"      :
+        log.type === "FORWARDED_TO_MAKE" ? "success" :
+        log.type === "WAITING"           ? "waiting" :
+        "info"
+      }">${log.type}</span></td>
       <td><pre>${JSON.stringify(log.data, null, 2)}</pre></td>
     </tr>
   `).join("");
@@ -139,14 +169,21 @@ app.get("/", (req, res) => {
         .badge { padding: 3px 8px; border-radius: 4px; font-size: 11px; font-weight: bold; }
         .error   { background: #7f1d1d; color: #fca5a5; }
         .success { background: #14532d; color: #86efac; }
+        .s5      { background: #4c1d95; color: #c4b5fd; }
         .waiting { background: #78350f; color: #fcd34d; }
         .info    { background: #1e3a5f; color: #93c5fd; }
         .status  { color: #86efac; font-size: 13px; margin-bottom: 20px; }
+        .config  { background: #1a1a2e; padding: 10px 16px; border-radius: 8px; margin-bottom: 20px; font-size: 12px; }
+        .config span { color: #a78bfa; font-weight: bold; }
       </style>
     </head>
     <body>
       <h1>🔮 Astro Middleware — Live Logs</h1>
       <p class="status">✅ Server running — auto-refreshes every 5 seconds</p>
+      <div class="config">
+        <span>S1 Webhook:</span> ${MAKE_WEBHOOK_URL ? '✅ Set (fallback)' : '❌ Not set'} &nbsp;&nbsp;
+        <span>S5 Webhook:</span> ${MAKE_S5_WEBHOOK_URL ? '✅ Set — routing all users to S5' : '⚠️ Not set — falling back to S1'}
+      </div>
       <p>Showing last ${logs.length} events</p>
       <table>
         <thead><tr><th>Time</th><th>Type</th><th>Data</th></tr></thead>
