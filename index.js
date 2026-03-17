@@ -36,18 +36,10 @@ app.post("/webhook", async (req, res) => {
     const body = req.body;
     addLog("RECEIVED", body);
 
+    // ✅ Only process workflow_response_update events
     if (body.type !== "workflow_response_update") {
       addLog("IGNORED", { reason: "Not workflow_response_update", type: body.type });
       return res.status(200).json({ status: "ignored" });
-    }
-
-    // ✅ Ignore FAQ/keyword triggers — only process actual form workflows
-    if (!body.data?.is_webhook_workflow && !body.data?.is_advanced_workflow) {
-      addLog("IGNORED_FAQ", {
-        reason: "FAQ or keyword trigger — not a form workflow",
-        triggered_from: body.data?.triggered_from
-      });
-      return res.status(200).json({ status: "ignored_faq" });
     }
 
     const data = body.data;
@@ -61,9 +53,11 @@ app.post("/webhook", async (req, res) => {
     const birthPlace = extractField(dataArray, "user_birth_place");
     const topic      = extractField(dataArray, "prediction_choice");
 
+    // ✅ If any field is missing, just wait — no need to block by workflow type
     if (!name || !birthDay || !birthMonth || !birthYear || !tob || !birthPlace || !topic) {
       addLog("WAITING", {
         reason: "Not all fields collected yet",
+        triggered_from: data.triggered_from || "unknown",
         collected: {
           name: !!name, birthDay: !!birthDay, birthMonth: !!birthMonth,
           birthYear: !!birthYear, tob: !!tob, birthPlace: !!birthPlace, topic: !!topic
