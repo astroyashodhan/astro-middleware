@@ -14,7 +14,6 @@ function addLog(type, data) {
   if (logs.length > 20) logs.pop();
 }
 
-// ✅ Dubai time (UTC+4)
 function getDubaiTime() {
   return new Date().toLocaleString("en-GB", {
     timeZone: "Asia/Dubai",
@@ -24,7 +23,6 @@ function getDubaiTime() {
   });
 }
 
-// ✅ Always picks LAST answer — handles user corrections/re-entries
 function extractField(dataArray, traitName) {
   const items = dataArray.filter(
     (d) => d.question && d.question.user_trait_name === traitName
@@ -45,7 +43,7 @@ app.post("/webhook", async (req, res) => {
 
     // ✅ Ignore FAQ/keyword triggers — only process actual form workflows
     if (!body.data?.is_webhook_workflow && !body.data?.is_advanced_workflow) {
-      addLog("IGNORED", {
+      addLog("IGNORED_FAQ", {
         reason: "FAQ or keyword trigger — not a form workflow",
         triggered_from: body.data?.triggered_from
       });
@@ -189,6 +187,7 @@ app.get("/", (req, res) => {
   `);
 });
 
+// ✅ THIS LINE IS CRITICAL — server won't start without it
 app.listen(PORT, () => {
   console.log(`🚀 Astro middleware running on port ${PORT}`);
 });
