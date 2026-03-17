@@ -10,11 +10,21 @@ const PORT = process.env.PORT || 8080;
 const logs = [];
 
 function addLog(type, data) {
-  logs.unshift({ time: new Date().toISOString(), type, data });
+  logs.unshift({ time: getDubaiTime(), type, data });
   if (logs.length > 20) logs.pop();
 }
 
-// FIXED: always picks LAST answer — handles user corrections/re-entries
+// ✅ Dubai time (UTC+4)
+function getDubaiTime() {
+  return new Date().toLocaleString("en-GB", {
+    timeZone: "Asia/Dubai",
+    year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", second: "2-digit",
+    hour12: false
+  });
+}
+
+// ✅ Always picks LAST answer — handles user corrections/re-entries
 function extractField(dataArray, traitName) {
   const items = dataArray.filter(
     (d) => d.question && d.question.user_trait_name === traitName
@@ -31,6 +41,15 @@ app.post("/webhook", async (req, res) => {
     if (body.type !== "workflow_response_update") {
       addLog("IGNORED", { reason: "Not workflow_response_update", type: body.type });
       return res.status(200).json({ status: "ignored" });
+    }
+
+    // ✅ Ignore FAQ/keyword triggers — only process actual form workflows
+    if (!body.data?.is_webhook_workflow && !body.data?.is_advanced_workflow) {
+      addLog("IGNORED", {
+        reason: "FAQ or keyword trigger — not a form workflow",
+        triggered_from: body.data?.triggered_from
+      });
+      return res.status(200).json({ status: "ignored_faq" });
     }
 
     const data = body.data;
@@ -55,7 +74,7 @@ app.post("/webhook", async (req, res) => {
       return res.status(200).json({ status: "waiting" });
     }
 
-    // ✅ Validate birth year is between 1935 and 2026
+    // ✅ Validate birth year between 1935 and 2026
     const yearNum = parseInt(birthYear, 10);
     if (isNaN(yearNum) || yearNum < 1935 || yearNum > 2026) {
       addLog("INVALID_YEAR", { birthYear, reason: "Must be between 1935 and 2026" });
@@ -159,10 +178,10 @@ app.get("/", (req, res) => {
     </head>
     <body>
       <h1>🔮 Astro Middleware — Live Logs</h1>
-      <p class="status">✅ Server running — auto-refreshes every 5 seconds</p>
+      <p class="status">✅ Server running — auto-refreshes every 5 seconds | 🕐 Dubai Time (UTC+4)</p>
       <p>Showing last ${logs.length} events</p>
       <table>
-        <thead><tr><th>Time</th><th>Type</th><th>Data</th></tr></thead>
+        <thead><tr><th>Time (Dubai)</th><th>Type</th><th>Data</th></tr></thead>
         <tbody>${rows || '<tr><td colspan="3" style="color:#888">No events yet. Waiting for Interakt webhook...</td></tr>'}</tbody>
       </table>
     </body>
