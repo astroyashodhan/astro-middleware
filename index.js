@@ -7,6 +7,7 @@ app.use(express.json());
 const MAKE_WEBHOOK_URL    = process.env.MAKE_WEBHOOK_URL;      // S1 — new users (all 7 fields)
 const MAKE_WEBHOOK_URL_S5 = process.env.MAKE_WEBHOOK_URL_S5;  // S5 — existing paid users (phone only)
 const S5_WORKFLOW_ID      = process.env.S5_WORKFLOW_ID;       // e.g. 3dce022e-7d17-4c68-a5aa-0859932198d9
+const S49_WORKFLOW_ID     = process.env.S49_WORKFLOW_ID;      // e.g. 8d85e19d-b58e-4aea-b311-52086b08145b
 
 const PORT = process.env.PORT || 8080;
 
@@ -83,6 +84,12 @@ app.post("/webhook", async (req, res) => {
 
     const data = body.data;
     const workflowId = data.workflow_id || "";
+
+    // ── S49: ₹49 reminder workflow — ignore silently ───────────────
+    if (workflowId === S49_WORKFLOW_ID) {
+      addLog("S49_IGNORED", { reason: "₹49 workflow — not processed here", workflow_id: workflowId });
+      return res.status(200).json({ status: "ignored_s49" });
+    }
 
     // ── S5: Existing paid user pressed ASK button ──────────────────
     if (workflowId === S5_WORKFLOW_ID) {
@@ -221,6 +228,7 @@ app.get("/", (req, res) => {
       <div class="env-box">
         <span class="label">Endpoint</span> → POST /webhook (handles both S1 + S5)<br>
         <span class="label">S5_WORKFLOW_ID</span> → <span class="val">${S5_WORKFLOW_ID || '⚠️ NOT SET — add to Railway env vars'}</span><br>
+        <span class="label">S49_WORKFLOW_ID</span> → <span class="val">${S49_WORKFLOW_ID || '⚠️ NOT SET — add to Railway env vars'}</span><br>
         <span class="label">MAKE_WEBHOOK_URL</span> → <span class="val">${MAKE_WEBHOOK_URL ? '✅ set' : '⚠️ NOT SET'}</span><br>
         <span class="label">MAKE_WEBHOOK_URL_S5</span> → <span class="val">${MAKE_WEBHOOK_URL_S5 ? '✅ set' : '⚠️ NOT SET'}</span>
       </div>
