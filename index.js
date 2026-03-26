@@ -494,7 +494,9 @@ app.post("/webhook", async (req, res) => {
     const birthYear  = extractField(dataArray, "user_birth_year");
     const tob        = extractField(dataArray, "user_birth_time");
     const birthPlace = extractField(dataArray, "user_birth_place");
-    const topic      = extractField(dataArray, "prediction_choice");
+    const topicRaw   = extractField(dataArray, "prediction_choice");
+    const TOPIC_MAP  = { "1": "Money", "2": "Career", "3": "Love", "4": "Today\'s Energy" };
+    const topic      = TOPIC_MAP[topicRaw] || topicRaw;
 
     const collected = { name, birthDay, birthMonth, birthYear, tob, birthPlace, topic };
     const missingFields = Object.entries(collected).filter(([, v]) => !v).map(([k]) => k);
@@ -520,8 +522,8 @@ app.post("/webhook", async (req, res) => {
       return res.status(200).json({ status: "success_s1" });
     }
 
-    // ── Partial fields → user stuck → Gemini takes over ──────────────
-    if (collectedCount > 0 && fullPhone) {
+    // ── Partial fields → user stuck → Gemini takes over (only if 3+ fields collected) ──
+    if (collectedCount >= 3 && fullPhone) {
       if (reaskedSessions[fullPhone]) {
         addLog("S1_WAITING", { reason: "Gemini session already active" });
         return res.status(200).json({ status: "reask_active" });
