@@ -303,15 +303,16 @@ async function startReaskSession(phone_full, partialData, missingFields) {
 
   const firstField = missingFields[0];
   const message = await generateReaskMessage(userName, firstField, true, 0);
-  await sendInteraktMessage(phoneNumber, countryCode, message);
-
-  session.messages.push({ direction: "out", field: firstField, message, time: getDubaiTime() });
-  await updateReaskSession(phone_full, {
-    currentField: firstField,
-    messages: session.messages
-  });
-
-  addLog("REASK_SENT_Q", { phone_full, field: firstField, message });
+  try {
+    await sendInteraktMessage(phoneNumber, countryCode, message);
+    session.messages.push({ direction: "out", field: firstField, message, time: getDubaiTime() });
+    await updateReaskSession(phone_full, { currentField: firstField, messages: session.messages });
+    addLog("REASK_SENT_Q", { phone_full, field: firstField, message });
+  } catch (err) {
+    addLog("REASK_SEND_FAILED", { phone_full, message: err.message });
+    await updateReaskSession(phone_full, { status: "failed" });
+    clearReaskSession(phone_full);
+  }
 }
 
 function clearReaskSession(phone_full) {
@@ -325,9 +326,15 @@ async function processReaskReply(phone_full, replyText) {
   const session = reaskedSessions[phone_full];
   if (!session) return false;
 
+  // Guard: if session has expired in memory, ignore
+  if (Date.now() > session.expiresAt) {
+    addLog("REASK_REPLY_IGNORED", { phone_full, reason: "Session expired" });
+    clearReaskSession(phone_full);
+    return false;
+  }
+
   const currentField = session.missingFields[session.fieldIndex];
 
-  // Log user reply to messages
   session.messages.push({ direction: "in", field: currentField, message: replyText, time: getDubaiTime() });
   addLog("REASK_PARSING", { phone_full, field: currentField, reply: replyText });
 
@@ -336,10 +343,16 @@ async function processReaskReply(phone_full, replyText) {
 
   if (!parsed.valid) {
     const msg = await generateCorrectionMessage(currentField, parsed.error);
-    await sendInteraktMessage(session.phoneNumber, session.countryCode, msg);
-    session.messages.push({ direction: "out", field: currentField, message: msg, time: getDubaiTime() });
-    await updateReaskSession(phone_full, { messages: session.messages });
-    addLog("REASK_CORRECTION_SENT", { phone_full, field: currentField });
+    try {
+      await sendInteraktMessage(session.phoneNumber, session.countryCode, msg);
+      session.messages.push({ direction: "out", field: currentField, message: msg, time: getDubaiTime() });
+      await updateReaskSession(phone_full, { messages: session.messages });
+      addLog("REASK_CORRECTION_SENT", { phone_full, field: currentField });
+    } catch (err) {
+      addLog("REASK_SEND_FAILED", { phone_full, message: err.message });
+      await updateReaskSession(phone_full, { status: "failed" });
+      clearReaskSession(phone_full);
+    }
     return true;
   }
 
@@ -357,10 +370,16 @@ async function processReaskReply(phone_full, replyText) {
   if (session.fieldIndex < session.missingFields.length) {
     const nextField = session.missingFields[session.fieldIndex];
     const msg = await generateReaskMessage(session.userName, nextField, false, session.fieldIndex);
-    await sendInteraktMessage(session.phoneNumber, session.countryCode, msg);
-    session.messages.push({ direction: "out", field: nextField, message: msg, time: getDubaiTime() });
-    await updateReaskSession(phone_full, { messages: session.messages });
-    addLog("REASK_SENT_Q", { phone_full, field: nextField });
+    try {
+      await sendInteraktMessage(session.phoneNumber, session.countryCode, msg);
+      session.messages.push({ direction: "out", field: nextField, message: msg, time: getDubaiTime() });
+      await updateReaskSession(phone_full, { messages: session.messages });
+      addLog("REASK_SENT_Q", { phone_full, field: nextField });
+    } catch (err) {
+      addLog("REASK_SEND_FAILED", { phone_full, message: err.message });
+      await updateReaskSession(phone_full, { status: "failed" });
+      clearReaskSession(phone_full);
+    }
   } else {
     await completeReaskSession(session);
   }
