@@ -6,9 +6,9 @@ const app = express();
 app.use(express.json());
 
 // ── Env vars ─────────────────────────────────────────────────────────
-const MAKE_S1_URL    = process.env.MAKE_S1_URL;    // Get Today Prediction
-const MAKE_S3_URL    = process.env.MAKE_S3_URL;    // Ask a Question
-const MAKE_S4_URL    = process.env.MAKE_S4_URL;    // Book 15 Min Call
+const MAKE_S1_URL    = process.env.MAKE_S1_URL;
+const MAKE_S3_URL    = process.env.MAKE_S3_URL;
+const MAKE_S4_URL    = process.env.MAKE_S4_URL;
 const DATABASE_URL   = process.env.DATABASE_URL;
 const PORT           = process.env.PORT || 8080;
 
@@ -98,24 +98,42 @@ function getDubaiTime() {
   });
 }
 
+// ── Clean string helper ───────────────────────────────────────────────
+function clean(val) {
+  if (!val) return null;
+  const s = val.toString().trim();
+  return s === "" ? null : s;
+}
+
 // ── Plan type router ──────────────────────────────────────────────────
 function getMakeUrl(planType) {
-  if (planType === "Prediction") return MAKE_S1_URL;
-  if (planType === "Ask")        return MAKE_S3_URL;
-  if (planType === "Consult")    return MAKE_S4_URL;
+  if (!planType) return null;
+  const p = planType.toLowerCase().trim();
+  if (p === "prediction") return MAKE_S1_URL;
+  if (p === "ask")        return MAKE_S3_URL;
+  if (p === "consult")    return MAKE_S4_URL;
   return null;
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// POST /webhook  — receives from Interakt via User Traits
+// POST /webhook
 // ─────────────────────────────────────────────────────────────────────
 app.post("/webhook", async (req, res) => {
   try {
-    const { n, d, bp, t, tp, cc, ph, pf } = req.body;
+    const raw = req.body;
+
+    // Clean all incoming fields
+    const n  = clean(raw.n);   // name
+    const d  = clean(raw.d);   // dob
+    const bp = clean(raw.bp);  // birth place
+    const t  = clean(raw.t);   // birth time
+    const tp = clean(raw.tp);  // plan type (Prediction/Ask/Consult)
+    const cc = clean(raw.cc);  // country code
+    const ph = clean(raw.ph);  // phone no code
+    const pf = clean(raw.pf);  // phone full
 
     addLog("RECEIVED", { n, d, bp, t, tp, cc, ph, pf });
-
-    await logEvent("received", pf || ph, n, tp, "received", req.body);
+    await logEvent("received", pf || ph, n, tp, "received", raw);
 
     // ── Validate all required fields ──────────────────────────────────
     const allFieldsPresent = n && d && bp && t && tp;
@@ -131,7 +149,7 @@ app.post("/webhook", async (req, res) => {
           topic:      !!tp
         }
       });
-      await logEvent("waiting", pf || ph, n, tp, "waiting", req.body);
+      await logEvent("waiting", pf || ph, n, tp, "waiting", raw);
       return res.json({ status: "waiting" });
     }
 
@@ -139,31 +157,31 @@ app.post("/webhook", async (req, res) => {
     const makeUrl = getMakeUrl(tp);
 
     if (!makeUrl) {
-      addLog("UNKNOWN_PLAN", { tp });
-      await logEvent("unknown_plan", pf || ph, n, tp, "unknown_plan", req.body);
+      addLog("UNKNOWN_PLAN", { tp, received: raw.tp });
+      await logEvent("unknown_plan", pf || ph, n, tp, "unknown_plan", raw);
       return res.json({ status: "unknown_plan", tp });
     }
 
     // ── Save to PostgreSQL ────────────────────────────────────────────
     await saveToDB({
-      phone:       pf || ph,
-      name:        n,
-      dob:         d,
-      birth_time:  t,
-      birth_place: bp,
-      plan_type:   tp,
+      phone:        pf || ph,
+      name:         n,
+      dob:          d,
+      birth_time:   t,
+      birth_place:  bp,
+      plan_type:    tp,
       country_code: cc,
       phone_nocode: ph
     });
 
     // ── Forward to Make.com ───────────────────────────────────────────
     const makePayload = {
-      phone:       pf || ph,
-      name:        n,
-      dob:         d,
-      birth_time:  t,
-      birth_place: bp,
-      plan_type:   tp,
+      phone:        pf || ph,
+      name:         n,
+      dob:          d,
+      birth_time:   t,
+      birth_place:  bp,
+      plan_type:    tp,
       country_code: cc
     };
 
@@ -172,12 +190,12 @@ app.post("/webhook", async (req, res) => {
     });
 
     addLog("SENT_TO_MAKE", { plan: tp, phone: ph, status: r.status });
-    await logEvent("forwarded", pf || ph, n, tp, `forwarded_${tp.toLowerCase()}`, req.body);
+    await logEvent("forwarded", pf || ph, n, tp, `forwarded_${tp.toLowerCase()}`, raw);
 
     return res.json({ status: "ok", plan: tp });
 
   } catch (err) {
-    addLog("ERROR", { message: err.message });
+    addLog("ERROR", { message: err.message, stack: err.stack });
     return res.status(500).json({ status: "error", message: err.message });
   }
 });
@@ -192,13 +210,13 @@ app.get("/dashboard", async (req, res) => {
     );
     const stats = await pool.query(`
       SELECT
-        COUNT(*)                                                      AS total,
-        COUNT(*) FILTER (WHERE plan_type = 'Prediction')              AS prediction,
-        COUNT(*) FILTER (WHERE plan_type = 'Ask')                     AS ask,
-        COUNT(*) FILTER (WHERE plan_type = 'Consult')                 AS consult,
-        COUNT(*) FILTER (WHERE status LIKE 'forwarded%')              AS forwarded,
-        COUNT(*) FILTER (WHERE status = 'waiting')                    AS waiting,
-        COUNT(*) FILTER (WHERE status = 'unknown_plan')               AS unknown
+        COUNT(*)                                                 AS total,
+        COUNT(*) FILTER (WHERE status LIKE 'forwarded%')        AS forwarded,
+        COUNT(*) FILTER (WHERE plan_type = 'Prediction')        AS prediction,
+        COUNT(*) FILTER (WHERE plan_type = 'Ask')               AS ask,
+        COUNT(*) FILTER (WHERE plan_type = 'Consult')           AS consult,
+        COUNT(*) FILTER (WHERE status = 'waiting')              AS waiting,
+        COUNT(*) FILTER (WHERE status = 'unknown_plan')         AS unknown
       FROM webhook_events
     `);
 
@@ -281,10 +299,10 @@ app.get("/dashboard", async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────
 app.get("/", (req, res) => {
   const envVars = {
-    MAKE_S1_URL:   !!MAKE_S1_URL,
-    MAKE_S3_URL:   !!MAKE_S3_URL,
-    MAKE_S4_URL:   !!MAKE_S4_URL,
-    DATABASE_URL:  !!DATABASE_URL
+    MAKE_S1_URL:  !!MAKE_S1_URL,
+    MAKE_S3_URL:  !!MAKE_S3_URL,
+    MAKE_S4_URL:  !!MAKE_S4_URL,
+    DATABASE_URL: !!DATABASE_URL
   };
 
   const envBar = Object.entries(envVars)
@@ -295,8 +313,8 @@ app.get("/", (req, res) => {
     <tr>
       <td>${log.time}</td>
       <td><span class="badge ${
-        log.type.includes("ERROR")     ? "error"   :
-        log.type.includes("SENT")      ? "success" :
+        log.type.includes("ERROR")    ? "error"   :
+        log.type.includes("SENT")     ? "success" :
         log.type.includes("WAITING") || log.type.includes("UNKNOWN") ? "waiting" : "info"
       }">${log.type}</span></td>
       <td><pre>${JSON.stringify(log.data, null, 2)}</pre></td>
@@ -335,9 +353,10 @@ app.get("/", (req, res) => {
   </div>
   <div class="env-bar">${envBar}</div>
   <div class="flow-box">
-    <b>Prediction</b> → n, d, bp, t, tp all present → Save DB → Make S1 ✅<br>
-    <b>Ask</b>        → n, d, bp, t, tp all present → Save DB → Make S3 ✅<br>
-    <b>Consult</b>    → n, d, bp, t, tp all present → Save DB → Make S4 ✅<br>
+    <b>Prediction</b> → n, d, bp, t, tp → Save DB → Make S1 ✅<br>
+    <b>Ask</b>        → n, d, bp, t, tp → Save DB → Make S3 ✅<br>
+    <b>Consult</b>    → n, d, bp, t, tp → Save DB → Make S4 ✅<br>
+    <b>tp matching</b> → case-insensitive ✅<br>
     <b>DB</b>         → PostgreSQL upsert on phone ✅
   </div>
   <table>
