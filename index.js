@@ -5,14 +5,12 @@ const { Pool } = require("pg");
 const app = express();
 app.use(express.json());
 
-// ── Env vars ─────────────────────────────────────────────────────────
-const MAKE_S1_URL    = process.env.MAKE_S1_URL;
-const MAKE_S3_URL    = process.env.MAKE_S3_URL;
-const MAKE_S4_URL    = process.env.MAKE_S4_URL;
-const DATABASE_URL   = process.env.DATABASE_URL;
-const PORT           = process.env.PORT || 8080;
+const MAKE_S1_URL  = process.env.MAKE_S1_URL;
+const MAKE_S3_URL  = process.env.MAKE_S3_URL;
+const MAKE_S4_URL  = process.env.MAKE_S4_URL;
+const DATABASE_URL = process.env.DATABASE_URL;
+const PORT         = process.env.PORT || 8080;
 
-// ── PostgreSQL ────────────────────────────────────────────────────────
 const pool = new Pool({
   connectionString: DATABASE_URL,
   ssl: { rejectUnauthorized: false }
@@ -81,7 +79,6 @@ async function saveToDB(data) {
   }
 }
 
-// ── In-memory logs ────────────────────────────────────────────────────
 const logs = [];
 
 function addLog(type, data) {
@@ -98,7 +95,27 @@ function getDubaiTime() {
   });
 }
 
-// ── Clean string helper ───────────────────────────────────────────────
+// ── Extract from Interakt data.data array ─────────────────────────────
+function extractField(dataArray, traitName) {
+  if (!dataArray || !Array.isArray(dataArray)) return null;
+  const items = dataArray.filter(
+    d => d.question && d.question.user_trait_name === traitName
+  );
+  if (!items.length) return null;
+  const val = items[items.length - 1].answer?.message;
+  return val && val.trim() !== "" ? val.trim() : null;
+}
+
+// ── Extract from contact_traits object ───────────────────────────────
+function extractTrait(traits, traitName) {
+  if (!traits) return null;
+  const val = traits[traitName];
+  if (!val) return null;
+  const s = val.toString().trim();
+  return s === "" ? null : s;
+}
+
+// ── Clean string ──────────────────────────────────────────────────────
 function clean(val) {
   if (!val) return null;
   const s = val.toString().trim();
@@ -115,84 +132,149 @@ function getMakeUrl(planType) {
   return null;
 }
 
+// ── COUNTRY CODES ─────────────────────────────────────────────────────
+const COUNTRY_CODES = [
+  "+971","+91","+1","+44","+61","+49","+33","+81","+86","+7",
+  "+92","+880","+94","+60","+65","+66","+62","+63","+84","+82",
+  "+27","+20","+234","+254","+212","+213","+216","+973","+965",
+  "+966","+974","+968","+962","+961","+972","+90","+39","+34",
+  "+31","+32","+41","+43","+46","+47","+45","+358","+351",
+  "+48","+36","+420","+40","+380","+375","+370","+371","+372"
+];
+
+function splitPhone(fullPhone) {
+  if (!fullPhone) return { countryCode: "", phoneNumber: fullPhone };
+  for (const code of COUNTRY_CODES) {
+    if (fullPhone.startsWith(code)) {
+      return {
+        countryCode: code,
+        phoneNumber: fullPhone.slice(code.length)
+      };
+    }
+  }
+  return { countryCode: "", phoneNumber: fullPhone };
+}
+
 // ─────────────────────────────────────────────────────────────────────
 // POST /webhook
 // ─────────────────────────────────────────────────────────────────────
 app.post("/webhook", async (req, res) => {
   try {
-    const raw = req.body;
+    const body = req.body;
 
-    // Clean all incoming fields
-    const n  = clean(raw.n);   // name
-    const d  = clean(raw.d);   // dob
-    const bp = clean(raw.bp);  // birth place
-    const t  = clean(raw.t);   // birth time
-    const tp = clean(raw.tp);  // plan type (Prediction/Ask/Consult)
-    const cc = clean(raw.cc);  // country code
-    const ph = clean(raw.ph);  // phone no code
-    const pf = clean(raw.pf);  // phone full
+    addLog("RECEIVED_RAW", {
+      type: body.type,
+      customer: body.data?.customer_name,
+      phone: body.data?.customer_number,
+      keys: Object.keys(body.data || {})
+    });
 
-    addLog("RECEIVED", { n, d, bp, t, tp, cc, ph, pf });
-    await logEvent("received", pf || ph, n, tp, "received", raw);
+    await logEvent("received", body.data?.customer_number, body.data?.customer_name, null, "received", body);
 
-    // ── Validate all required fields ──────────────────────────────────
-    const allFieldsPresent = n && d && bp && t && tp;
+    // ── Only process workflow_response_update ─────────────────────────
+    if (body.type !== "workflow_response_update") {
+      addLog("IGNORED", { type: body.type });
+      return res.json({ status: "ignored" });
+    }
+
+    const data        = body.data || {};
+    const fullPhone   = data.customer_number || "";
+    const dataArray   = data.data || [];
+    const traits      = data.contact_traits || data.customer_traits || {};
+
+    addLog("PARSING", {
+      fullPhone,
+      dataArrayLength: dataArray.length,
+      traitKeys: Object.keys(traits),
+      rawTraits: traits
+    });
+
+    // ── Try extracting from data.data array first ─────────────────────
+    let name       = extractField(dataArray, "name");
+    let dob        = extractField(dataArray, "dob");
+    let birthPlace = extractField(dataArray, "user_birth_place");
+    let birthTime  = extractField(dataArray, "user_birth_time");
+    let planType   = extractField(dataArray, "getpredection");
+
+    // ── Fallback: try contact_traits object ───────────────────────────
+    if (!name)       name       = extractTrait(traits, "name");
+    if (!dob)        dob        = extractTrait(traits, "dob");
+    if (!birthPlace) birthPlace = extractTrait(traits, "user_birth_place");
+    if (!birthTime)  birthTime  = extractTrait(traits, "user_birth_time");
+    if (!planType)   planType   = extractTrait(traits, "getpredection");
+
+    // ── Fallback: try direct body fields (custom webhook body) ────────
+    if (!name)       name       = clean(body.n || data.n);
+    if (!dob)        dob        = clean(body.d || data.d);
+    if (!birthPlace) birthPlace = clean(body.bp || data.bp);
+    if (!birthTime)  birthTime  = clean(body.t || data.t);
+    if (!planType)   planType   = clean(body.tp || data.tp);
+
+    const { countryCode, phoneNumber } = splitPhone(fullPhone);
+
+    addLog("EXTRACTED", {
+      name, dob, birthPlace, birthTime, planType,
+      phone: fullPhone
+    });
+
+    // ── Validate ──────────────────────────────────────────────────────
+    const allFieldsPresent = name && dob && birthPlace && birthTime && planType;
 
     if (!allFieldsPresent) {
-      addLog("S1_WAITING", {
+      addLog("WAITING", {
         reason: "Not all fields collected yet",
         collected: {
-          name:       !!n,
-          dob:        !!d,
-          birthPlace: !!bp,
-          tob:        !!t,
-          topic:      !!tp
+          name:       !!name,
+          dob:        !!dob,
+          birthPlace: !!birthPlace,
+          tob:        !!birthTime,
+          topic:      !!planType
         }
       });
-      await logEvent("waiting", pf || ph, n, tp, "waiting", raw);
+      await logEvent("waiting", fullPhone, name, planType, "waiting", body);
       return res.json({ status: "waiting" });
     }
 
-    // ── Get Make.com URL based on plan_type ───────────────────────────
-    const makeUrl = getMakeUrl(tp);
+    // ── Route to Make.com ─────────────────────────────────────────────
+    const makeUrl = getMakeUrl(planType);
 
     if (!makeUrl) {
-      addLog("UNKNOWN_PLAN", { tp, received: raw.tp });
-      await logEvent("unknown_plan", pf || ph, n, tp, "unknown_plan", raw);
-      return res.json({ status: "unknown_plan", tp });
+      addLog("UNKNOWN_PLAN", { planType });
+      await logEvent("unknown_plan", fullPhone, name, planType, "unknown_plan", body);
+      return res.json({ status: "unknown_plan", planType });
     }
 
-    // ── Save to PostgreSQL ────────────────────────────────────────────
+    // ── Save to DB ────────────────────────────────────────────────────
     await saveToDB({
-      phone:        pf || ph,
-      name:         n,
-      dob:          d,
-      birth_time:   t,
-      birth_place:  bp,
-      plan_type:    tp,
-      country_code: cc,
-      phone_nocode: ph
+      phone:        fullPhone,
+      name,
+      dob,
+      birth_time:   birthTime,
+      birth_place:  birthPlace,
+      plan_type:    planType,
+      country_code: countryCode,
+      phone_nocode: phoneNumber
     });
 
-    // ── Forward to Make.com ───────────────────────────────────────────
+    // ── Send to Make.com ──────────────────────────────────────────────
     const makePayload = {
-      phone:        pf || ph,
-      name:         n,
-      dob:          d,
-      birth_time:   t,
-      birth_place:  bp,
-      plan_type:    tp,
-      country_code: cc
+      phone:        fullPhone,
+      name,
+      dob,
+      birth_time:   birthTime,
+      birth_place:  birthPlace,
+      plan_type:    planType,
+      country_code: countryCode
     };
 
     const r = await axios.post(makeUrl, makePayload, {
       headers: { "Content-Type": "application/json" }
     });
 
-    addLog("SENT_TO_MAKE", { plan: tp, phone: ph, status: r.status });
-    await logEvent("forwarded", pf || ph, n, tp, `forwarded_${tp.toLowerCase()}`, raw);
+    addLog("SENT_TO_MAKE", { plan: planType, phone: fullPhone, status: r.status });
+    await logEvent("forwarded", fullPhone, name, planType, `forwarded_${planType.toLowerCase()}`, body);
 
-    return res.json({ status: "ok", plan: tp });
+    return res.json({ status: "ok", plan: planType });
 
   } catch (err) {
     addLog("ERROR", { message: err.message, stack: err.stack });
@@ -210,13 +292,13 @@ app.get("/dashboard", async (req, res) => {
     );
     const stats = await pool.query(`
       SELECT
-        COUNT(*)                                                 AS total,
-        COUNT(*) FILTER (WHERE status LIKE 'forwarded%')        AS forwarded,
-        COUNT(*) FILTER (WHERE plan_type = 'Prediction')        AS prediction,
-        COUNT(*) FILTER (WHERE plan_type = 'Ask')               AS ask,
-        COUNT(*) FILTER (WHERE plan_type = 'Consult')           AS consult,
-        COUNT(*) FILTER (WHERE status = 'waiting')              AS waiting,
-        COUNT(*) FILTER (WHERE status = 'unknown_plan')         AS unknown
+        COUNT(*)                                          AS total,
+        COUNT(*) FILTER (WHERE status LIKE 'forwarded%') AS forwarded,
+        COUNT(*) FILTER (WHERE plan_type = 'Prediction') AS prediction,
+        COUNT(*) FILTER (WHERE plan_type = 'Ask')        AS ask,
+        COUNT(*) FILTER (WHERE plan_type = 'Consult')    AS consult,
+        COUNT(*) FILTER (WHERE status = 'waiting')       AS waiting,
+        COUNT(*) FILTER (WHERE status = 'unknown_plan')  AS unknown
       FROM webhook_events
     `);
 
@@ -313,8 +395,8 @@ app.get("/", (req, res) => {
     <tr>
       <td>${log.time}</td>
       <td><span class="badge ${
-        log.type.includes("ERROR")    ? "error"   :
-        log.type.includes("SENT")     ? "success" :
+        log.type.includes("ERROR")   ? "error"   :
+        log.type.includes("SENT")    ? "success" :
         log.type.includes("WAITING") || log.type.includes("UNKNOWN") ? "waiting" : "info"
       }">${log.type}</span></td>
       <td><pre>${JSON.stringify(log.data, null, 2)}</pre></td>
@@ -353,11 +435,11 @@ app.get("/", (req, res) => {
   </div>
   <div class="env-bar">${envBar}</div>
   <div class="flow-box">
-    <b>Prediction</b> → n, d, bp, t, tp → Save DB → Make S1 ✅<br>
-    <b>Ask</b>        → n, d, bp, t, tp → Save DB → Make S3 ✅<br>
-    <b>Consult</b>    → n, d, bp, t, tp → Save DB → Make S4 ✅<br>
-    <b>tp matching</b> → case-insensitive ✅<br>
-    <b>DB</b>         → PostgreSQL upsert on phone ✅
+    <b>Source 1</b> → data.data array (extractField) ✅<br>
+    <b>Source 2</b> → contact_traits object (extractTrait) ✅<br>
+    <b>Source 3</b> → direct body fields fallback ✅<br>
+    <b>Routing</b>  → Prediction→S1 | Ask→S3 | Consult→S4 ✅<br>
+    <b>DB</b>       → PostgreSQL upsert on phone ✅
   </div>
   <table>
     <thead><tr><th>Time (Dubai)</th><th>Type</th><th>Data</th></tr></thead>
