@@ -191,7 +191,13 @@ app.post("/webhook", async (req, res) => {
 
     // ── Try extracting from data.data array first ─────────────────────
     let name       = extractField(dataArray, "name");
-    let dob        = extractField(dataArray, "dob");
+    const birthDay   = extractField(dataArray, "user_birth_day");
+const birthMonth = extractField(dataArray, "user_birth_month");
+const birthYear  = extractField(dataArray, "user_birth_year");
+
+let dob = null;
+if (birthDay && birthMonth && birthYear) {
+  dob = `${birthDay} ${birthMonth} ${birthYear}`;
     let birthPlace = extractField(dataArray, "user_birth_place");
     let birthTime  = extractField(dataArray, "user_birth_time");
     let planType   = extractField(dataArray, "getpredection");
