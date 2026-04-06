@@ -28,7 +28,9 @@ async function initDB() {
       plan_type VARCHAR(50),
       status VARCHAR(50),
       raw_payload JSONB
-    );
+    )
+  `);
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS users (
       phone VARCHAR(30) PRIMARY KEY,
       name VARCHAR(100),
@@ -39,7 +41,7 @@ async function initDB() {
       country_code VARCHAR(10),
       phone_nocode VARCHAR(20),
       updated_at TIMESTAMPTZ DEFAULT NOW()
-    );
+    )
   `);
   console.log("✅ Database ready");
 }
@@ -125,7 +127,7 @@ const COUNTRY_CODES = [
 ];
 
 function splitPhone(fullPhone) {
-  if (!fullPhone) return { countryCode: "", phoneNumber: fullPhone || "" };
+  if (!fullPhone) return { countryCode: "", phoneNumber: "" };
   for (const code of COUNTRY_CODES) {
     if (fullPhone.startsWith(code)) {
       return { countryCode: code, phoneNumber: fullPhone.slice(code.length) };
@@ -169,7 +171,7 @@ app.post("/webhook", async (req, res) => {
     const fullPhone = data.customer_number || "";
     const dataArray = data.data || [];
 
-    // ── Extract all fields from data.data array ───────────────────────
+    // ── Extract all fields ────────────────────────────────────────────
     const name       = extractField(dataArray, "name");
     const birthDay   = extractField(dataArray, "user_birth_day");
     const birthMonth = extractField(dataArray, "user_birth_month");
@@ -234,7 +236,7 @@ app.post("/webhook", async (req, res) => {
 
     // ── Send to Make.com ──────────────────────────────────────────────
     const makePayload = {
-      phone:        fullPhone,
+      phone_full:   fullPhone,
       name,
       dob,
       birth_time:   birthTime,
@@ -411,10 +413,11 @@ app.get("/", (req, res) => {
   </div>
   <div class="env-bar">${envBar}</div>
   <div class="flow-box">
-    <b>Fields</b>   → name, day, month, year, time, place, plan from data.data array ✅<br>
-    <b>DOB</b>      → built from day + month + year ✅<br>
-    <b>Routing</b>  → Prediction→S1 | Ask→S3 | Consult→S4 ✅<br>
-    <b>DB</b>       → PostgreSQL upsert on phone ✅
+    <b>Fields</b>  → name, day, month, year, time, place, plan from data.data array ✅<br>
+    <b>DOB</b>     → built from day + month + year ✅<br>
+    <b>Routing</b> → Prediction→S1 | Ask→S3 | Consult→S4 ✅<br>
+    <b>Make key</b>→ phone_full ✅<br>
+    <b>DB</b>      → PostgreSQL upsert on phone ✅
   </div>
   <table>
     <thead><tr><th>Time (Dubai)</th><th>Type</th><th>Data</th></tr></thead>
