@@ -11,6 +11,7 @@ const MAKE_S4_URL  = process.env.MAKE_S4_URL;
 const DATABASE_URL = process.env.DATABASE_URL;
 const PORT         = process.env.PORT || 8080;
 
+// ── PostgreSQL ────────────────────────────────────────────────────────
 const pool = new Pool({
   connectionString: DATABASE_URL,
   ssl: { rejectUnauthorized: false }
@@ -73,19 +74,17 @@ async function saveToDB(data) {
       data.phone, data.name, data.dob, data.birth_time,
       data.birth_place, data.plan_type, data.country_code, data.phone_nocode
     ]);
-    console.log("✅ Saved to DB:", data.phone);
   } catch (err) {
     console.error("DB save error:", err.message);
   }
 }
 
+// ── Logs ──────────────────────────────────────────────────────────────
 const logs = [];
-
 function addLog(type, data) {
   logs.unshift({ time: getDubaiTime(), type, data });
   if (logs.length > 100) logs.pop();
 }
-
 function getDubaiTime() {
   return new Date().toLocaleString("en-GB", {
     timeZone: "Asia/Dubai",
@@ -95,7 +94,7 @@ function getDubaiTime() {
   });
 }
 
-// ── Extract from Interakt data.data array ─────────────────────────────
+// ── Extract from data.data array ──────────────────────────────────────
 function extractField(dataArray, traitName) {
   if (!dataArray || !Array.isArray(dataArray)) return null;
   const items = dataArray.filter(
@@ -103,36 +102,19 @@ function extractField(dataArray, traitName) {
   );
   if (!items.length) return null;
   const val = items[items.length - 1].answer?.message;
-  return val && val.trim() !== "" ? val.trim() : null;
-}
-
-// ── Extract from contact_traits object ───────────────────────────────
-function extractTrait(traits, traitName) {
-  if (!traits) return null;
-  const val = traits[traitName];
   if (!val) return null;
   const s = val.toString().trim();
   return s === "" ? null : s;
 }
 
-// ── Clean string ──────────────────────────────────────────────────────
+// ── Clean value ───────────────────────────────────────────────────────
 function clean(val) {
   if (!val) return null;
   const s = val.toString().trim();
   return s === "" ? null : s;
 }
 
-// ── Plan type router ──────────────────────────────────────────────────
-function getMakeUrl(planType) {
-  if (!planType) return null;
-  const p = planType.toLowerCase().trim();
-  if (p === "prediction") return MAKE_S1_URL;
-  if (p === "ask")        return MAKE_S3_URL;
-  if (p === "consult")    return MAKE_S4_URL;
-  return null;
-}
-
-// ── COUNTRY CODES ─────────────────────────────────────────────────────
+// ── Phone splitter ────────────────────────────────────────────────────
 const COUNTRY_CODES = [
   "+971","+91","+1","+44","+61","+49","+33","+81","+86","+7",
   "+92","+880","+94","+60","+65","+66","+62","+63","+84","+82",
@@ -143,16 +125,23 @@ const COUNTRY_CODES = [
 ];
 
 function splitPhone(fullPhone) {
-  if (!fullPhone) return { countryCode: "", phoneNumber: fullPhone };
+  if (!fullPhone) return { countryCode: "", phoneNumber: fullPhone || "" };
   for (const code of COUNTRY_CODES) {
     if (fullPhone.startsWith(code)) {
-      return {
-        countryCode: code,
-        phoneNumber: fullPhone.slice(code.length)
-      };
+      return { countryCode: code, phoneNumber: fullPhone.slice(code.length) };
     }
   }
   return { countryCode: "", phoneNumber: fullPhone };
+}
+
+// ── Plan router ───────────────────────────────────────────────────────
+function getMakeUrl(planType) {
+  if (!planType) return null;
+  const p = planType.toLowerCase().trim();
+  if (p === "prediction") return MAKE_S1_URL;
+  if (p === "ask")        return MAKE_S3_URL;
+  if (p === "consult")    return MAKE_S4_URL;
+  return null;
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -165,61 +154,40 @@ app.post("/webhook", async (req, res) => {
     addLog("RECEIVED_RAW", {
       type: body.type,
       customer: body.data?.customer_name,
-      phone: body.data?.customer_number,
-      keys: Object.keys(body.data || {})
+      phone: body.data?.customer_number
     });
 
     await logEvent("received", body.data?.customer_number, body.data?.customer_name, null, "received", body);
 
-    // ── Only process workflow_response_update ─────────────────────────
+    // Only process workflow_response_update
     if (body.type !== "workflow_response_update") {
       addLog("IGNORED", { type: body.type });
       return res.json({ status: "ignored" });
     }
 
-    const data        = body.data || {};
-    const fullPhone   = data.customer_number || "";
-    const dataArray   = data.data || [];
-    const traits      = data.contact_traits || data.customer_traits || {};
+    const data      = body.data || {};
+    const fullPhone = data.customer_number || "";
+    const dataArray = data.data || [];
 
-    addLog("PARSING", {
-      fullPhone,
-      dataArrayLength: dataArray.length,
-      traitKeys: Object.keys(traits),
-      rawTraits: traits
-    });
-
-    // ── Try extracting from data.data array first ─────────────────────
-    let name       = extractField(dataArray, "name");
+    // ── Extract all fields from data.data array ───────────────────────
+    const name       = extractField(dataArray, "name");
     const birthDay   = extractField(dataArray, "user_birth_day");
-const birthMonth = extractField(dataArray, "user_birth_month");
-const birthYear  = extractField(dataArray, "user_birth_year");
+    const birthMonth = extractField(dataArray, "user_birth_month");
+    const birthYear  = extractField(dataArray, "user_birth_year");
+    const birthTime  = extractField(dataArray, "user_birth_time");
+    const birthPlace = extractField(dataArray, "user_birth_place");
+    const planType   = extractField(dataArray, "getpredection");
 
-let dob = null;
-if (birthDay && birthMonth && birthYear) {
-  dob = `${birthDay} ${birthMonth} ${birthYear}`;
-    let birthPlace = extractField(dataArray, "user_birth_place");
-    let birthTime  = extractField(dataArray, "user_birth_time");
-    let planType   = extractField(dataArray, "getpredection");
-
-    // ── Fallback: try contact_traits object ───────────────────────────
-    if (!name)       name       = extractTrait(traits, "name");
-    if (!dob)        dob        = extractTrait(traits, "dob");
-    if (!birthPlace) birthPlace = extractTrait(traits, "user_birth_place");
-    if (!birthTime)  birthTime  = extractTrait(traits, "user_birth_time");
-    if (!planType)   planType   = extractTrait(traits, "getpredection");
-
-    // ── Fallback: try direct body fields (custom webhook body) ────────
-    if (!name)       name       = clean(body.n || data.n);
-    if (!dob)        dob        = clean(body.d || data.d);
-    if (!birthPlace) birthPlace = clean(body.bp || data.bp);
-    if (!birthTime)  birthTime  = clean(body.t || data.t);
-    if (!planType)   planType   = clean(body.tp || data.tp);
+    // Build dob from parts
+    const dob = (birthDay && birthMonth && birthYear)
+      ? `${birthDay} ${birthMonth} ${birthYear}`
+      : null;
 
     const { countryCode, phoneNumber } = splitPhone(fullPhone);
 
     addLog("EXTRACTED", {
-      name, dob, birthPlace, birthTime, planType,
+      name, birthDay, birthMonth, birthYear,
+      dob, birthTime, birthPlace, planType,
       phone: fullPhone
     });
 
@@ -231,6 +199,9 @@ if (birthDay && birthMonth && birthYear) {
         reason: "Not all fields collected yet",
         collected: {
           name:       !!name,
+          birthDay:   !!birthDay,
+          birthMonth: !!birthMonth,
+          birthYear:  !!birthYear,
           dob:        !!dob,
           birthPlace: !!birthPlace,
           tob:        !!birthTime,
@@ -241,9 +212,8 @@ if (birthDay && birthMonth && birthYear) {
       return res.json({ status: "waiting" });
     }
 
-    // ── Route to Make.com ─────────────────────────────────────────────
+    // ── Route ─────────────────────────────────────────────────────────
     const makeUrl = getMakeUrl(planType);
-
     if (!makeUrl) {
       addLog("UNKNOWN_PLAN", { planType });
       await logEvent("unknown_plan", fullPhone, name, planType, "unknown_plan", body);
@@ -283,7 +253,7 @@ if (birthDay && birthMonth && birthYear) {
     return res.json({ status: "ok", plan: planType });
 
   } catch (err) {
-    addLog("ERROR", { message: err.message, stack: err.stack });
+    addLog("ERROR", { message: err.message });
     return res.status(500).json({ status: "error", message: err.message });
   }
 });
@@ -411,7 +381,7 @@ app.get("/", (req, res) => {
   res.send(`<!DOCTYPE html>
 <html>
 <head>
-  <title>Astro Middleware v12</title>
+  <title>Astro Middleware v13</title>
   <meta http-equiv="refresh" content="5">
   <style>
     body { font-family: monospace; background: #0f0f0f; color: #e0e0e0; padding: 20px; }
@@ -433,7 +403,7 @@ app.get("/", (req, res) => {
   </style>
 </head>
 <body>
-  <h1>🔮 Astro Middleware v12</h1>
+  <h1>🔮 Astro Middleware v13</h1>
   <p class="status">✅ Running — auto-refresh 5s | 🕐 Dubai Time (UTC+4) | ${logs.length} events</p>
   <div class="nav" style="margin-bottom:12px">
     <a href="/dashboard">📊 Dashboard</a>
@@ -441,9 +411,8 @@ app.get("/", (req, res) => {
   </div>
   <div class="env-bar">${envBar}</div>
   <div class="flow-box">
-    <b>Source 1</b> → data.data array (extractField) ✅<br>
-    <b>Source 2</b> → contact_traits object (extractTrait) ✅<br>
-    <b>Source 3</b> → direct body fields fallback ✅<br>
+    <b>Fields</b>   → name, day, month, year, time, place, plan from data.data array ✅<br>
+    <b>DOB</b>      → built from day + month + year ✅<br>
     <b>Routing</b>  → Prediction→S1 | Ask→S3 | Consult→S4 ✅<br>
     <b>DB</b>       → PostgreSQL upsert on phone ✅
   </div>
@@ -455,12 +424,10 @@ app.get("/", (req, res) => {
 </html>`);
 });
 
-// ─────────────────────────────────────────────────────────────────────
-// Boot
-// ─────────────────────────────────────────────────────────────────────
+// ── Boot ──────────────────────────────────────────────────────────────
 initDB().then(() => {
   app.listen(PORT, () => {
-    console.log(`🚀 Astro middleware v12 running on port ${PORT}`);
+    console.log(`🚀 Astro middleware v13 running on port ${PORT}`);
   });
 }).catch(err => {
   console.error("❌ DB init failed:", err.message);
