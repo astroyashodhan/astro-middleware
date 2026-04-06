@@ -154,7 +154,6 @@ app.post("/webhook", async (req, res) => {
 
     await logEvent("received", body.data?.customer_number, body.data?.customer_name, null, "received", body);
 
-    // Only process workflow_response_update
     if (body.type !== "workflow_response_update") {
       addLog("IGNORED", { type: body.type });
       return res.json({ status: "ignored" });
@@ -183,7 +182,9 @@ app.post("/webhook", async (req, res) => {
     addLog("EXTRACTED", {
       name, birthDay, birthMonth, birthYear,
       dob, birthTime, birthPlace, planType,
-      phone_full: fullPhone
+      phone_full: fullPhone,
+      phone_number: phoneNumber,
+      country_code: countryCode
     });
 
     // ── Validate ──────────────────────────────────────────────────────
@@ -230,19 +231,20 @@ app.post("/webhook", async (req, res) => {
     // ── Send to Make.com ──────────────────────────────────────────────
     const makePayload = {
       phone_full:   fullPhone,
+      phone_number: phoneNumber,
+      country_code: countryCode,
       name,
       dob,
       birth_time:   birthTime,
       birth_place:  birthPlace,
-      plan_type:    planType,
-      country_code: countryCode
+      plan_type:    planType
     };
 
     const r = await axios.post(makeUrl, makePayload, {
       headers: { "Content-Type": "application/json" }
     });
 
-    addLog("SENT_TO_MAKE", { plan: planType, phone_full: fullPhone, status: r.status });
+    addLog("SENT_TO_MAKE", { plan: planType, phone_full: fullPhone, phone_number: phoneNumber, status: r.status });
     await logEvent("forwarded", fullPhone, name, planType, `forwarded_${planType.toLowerCase()}`, body);
 
     return res.json({ status: "ok", plan: planType });
@@ -376,7 +378,7 @@ app.get("/", (req, res) => {
   res.send(`<!DOCTYPE html>
 <html>
 <head>
-  <title>Astro Middleware v14</title>
+  <title>Astro Middleware v15</title>
   <meta http-equiv="refresh" content="5">
   <style>
     body { font-family: monospace; background: #0f0f0f; color: #e0e0e0; padding: 20px; }
@@ -398,7 +400,7 @@ app.get("/", (req, res) => {
   </style>
 </head>
 <body>
-  <h1>🔮 Astro Middleware v14</h1>
+  <h1>🔮 Astro Middleware v15</h1>
   <p class="status">✅ Running — auto-refresh 5s | 🕐 Dubai Time (UTC+4) | ${logs.length} events</p>
   <div class="nav" style="margin-bottom:12px">
     <a href="/dashboard">📊 Dashboard</a>
@@ -409,7 +411,7 @@ app.get("/", (req, res) => {
     <b>Fields</b>    → name, day, month, year, time, place, plan from data.data array ✅<br>
     <b>DOB</b>       → built from day + month + year ✅<br>
     <b>Routing</b>   → Prediction→S1 | Ask→S3 | Consult→S4 ✅<br>
-    <b>Make key</b>  → phone_full ✅<br>
+    <b>Make keys</b> → phone_full + phone_number + country_code ✅<br>
     <b>DB</b>        → PostgreSQL upsert on phone ✅
   </div>
   <table>
@@ -423,7 +425,7 @@ app.get("/", (req, res) => {
 // ── Boot ──────────────────────────────────────────────────────────────
 initDB().then(() => {
   app.listen(PORT, () => {
-    console.log(`🚀 Astro middleware v14 running on port ${PORT}`);
+    console.log(`🚀 Astro middleware v15 running on port ${PORT}`);
   });
 }).catch(err => {
   console.error("❌ DB init failed:", err.message);
