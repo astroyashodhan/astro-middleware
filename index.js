@@ -30,6 +30,13 @@ async function initDB() {
       raw_payload JSONB
     )
   `);
+  
+  // Add plan_type column if it doesn't exist
+  await pool.query(`
+    ALTER TABLE webhook_events 
+    ADD COLUMN IF NOT EXISTS plan_type VARCHAR(50)
+  `);
+
   await pool.query(`
     CREATE TABLE IF NOT EXISTS users (
       phone VARCHAR(30) PRIMARY KEY,
