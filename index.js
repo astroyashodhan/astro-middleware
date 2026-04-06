@@ -109,13 +109,6 @@ function extractField(dataArray, traitName) {
   return s === "" ? null : s;
 }
 
-// ── Clean value ───────────────────────────────────────────────────────
-function clean(val) {
-  if (!val) return null;
-  const s = val.toString().trim();
-  return s === "" ? null : s;
-}
-
 // ── Phone splitter ────────────────────────────────────────────────────
 const COUNTRY_CODES = [
   "+971","+91","+1","+44","+61","+49","+33","+81","+86","+7",
@@ -190,7 +183,7 @@ app.post("/webhook", async (req, res) => {
     addLog("EXTRACTED", {
       name, birthDay, birthMonth, birthYear,
       dob, birthTime, birthPlace, planType,
-      phone: fullPhone
+      phone_full: fullPhone
     });
 
     // ── Validate ──────────────────────────────────────────────────────
@@ -249,7 +242,7 @@ app.post("/webhook", async (req, res) => {
       headers: { "Content-Type": "application/json" }
     });
 
-    addLog("SENT_TO_MAKE", { plan: planType, phone: fullPhone, status: r.status });
+    addLog("SENT_TO_MAKE", { plan: planType, phone_full: fullPhone, status: r.status });
     await logEvent("forwarded", fullPhone, name, planType, `forwarded_${planType.toLowerCase()}`, body);
 
     return res.json({ status: "ok", plan: planType });
@@ -383,7 +376,7 @@ app.get("/", (req, res) => {
   res.send(`<!DOCTYPE html>
 <html>
 <head>
-  <title>Astro Middleware v13</title>
+  <title>Astro Middleware v14</title>
   <meta http-equiv="refresh" content="5">
   <style>
     body { font-family: monospace; background: #0f0f0f; color: #e0e0e0; padding: 20px; }
@@ -405,7 +398,7 @@ app.get("/", (req, res) => {
   </style>
 </head>
 <body>
-  <h1>🔮 Astro Middleware v13</h1>
+  <h1>🔮 Astro Middleware v14</h1>
   <p class="status">✅ Running — auto-refresh 5s | 🕐 Dubai Time (UTC+4) | ${logs.length} events</p>
   <div class="nav" style="margin-bottom:12px">
     <a href="/dashboard">📊 Dashboard</a>
@@ -413,11 +406,11 @@ app.get("/", (req, res) => {
   </div>
   <div class="env-bar">${envBar}</div>
   <div class="flow-box">
-    <b>Fields</b>  → name, day, month, year, time, place, plan from data.data array ✅<br>
-    <b>DOB</b>     → built from day + month + year ✅<br>
-    <b>Routing</b> → Prediction→S1 | Ask→S3 | Consult→S4 ✅<br>
-    <b>Make key</b>→ phone_full ✅<br>
-    <b>DB</b>      → PostgreSQL upsert on phone ✅
+    <b>Fields</b>    → name, day, month, year, time, place, plan from data.data array ✅<br>
+    <b>DOB</b>       → built from day + month + year ✅<br>
+    <b>Routing</b>   → Prediction→S1 | Ask→S3 | Consult→S4 ✅<br>
+    <b>Make key</b>  → phone_full ✅<br>
+    <b>DB</b>        → PostgreSQL upsert on phone ✅
   </div>
   <table>
     <thead><tr><th>Time (Dubai)</th><th>Type</th><th>Data</th></tr></thead>
@@ -430,7 +423,7 @@ app.get("/", (req, res) => {
 // ── Boot ──────────────────────────────────────────────────────────────
 initDB().then(() => {
   app.listen(PORT, () => {
-    console.log(`🚀 Astro middleware v13 running on port ${PORT}`);
+    console.log(`🚀 Astro middleware v14 running on port ${PORT}`);
   });
 }).catch(err => {
   console.error("❌ DB init failed:", err.message);
