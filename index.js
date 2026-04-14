@@ -176,7 +176,6 @@ app.post("/webhook", async (req, res) => {
     const fullPhone = data.customer_number || "";
     const dataArray = data.data || [];
 
-    // ── Extract all fields from webhook payload ───────────────────────
     const name       = extractField(dataArray, "name");
     const birthDay   = extractField(dataArray, "user_birth_day");
     const birthMonth = extractField(dataArray, "user_birth_month");
@@ -246,7 +245,6 @@ app.post("/webhook", async (req, res) => {
       planType: finalPlanType, phone_full: fullPhone
     });
 
-    // ── Validate ──────────────────────────────────────────────────────
     const allFieldsPresent = finalName && finalDob && finalBirthPlace && finalBirthTime && finalPlanType;
 
     if (!allFieldsPresent) {
@@ -261,7 +259,6 @@ app.post("/webhook", async (req, res) => {
       return res.json({ status: "waiting" });
     }
 
-    // ── Route ─────────────────────────────────────────────────────────
     const makeUrl = getMakeUrl(finalPlanType);
     if (!makeUrl) {
       addLog("UNKNOWN_PLAN", { planType: finalPlanType });
@@ -269,7 +266,6 @@ app.post("/webhook", async (req, res) => {
       return res.json({ status: "unknown_plan", planType: finalPlanType });
     }
 
-    // ── Save + Send ───────────────────────────────────────────────────
     await saveToDB({
       phone: fullPhone, name: finalName, dob: finalDob,
       birth_time: finalBirthTime, birth_place: finalBirthPlace,
@@ -294,47 +290,45 @@ app.post("/webhook", async (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────
-// POST /webhook-returning  (returning users — Interakt sends all traits)
+// POST /webhook-returning  (returning users)
 //
-// Set this URL in Interakt returning user workflow webhook step:
-// https://astro-middleware-production.up.railway.app/webhook-returning
-//
-// Interakt webhook body should be:
+// Interakt webhook body (use exactly these keys):
 // {
-//   "phone": "{{contact.phone_number}}",
-//   "name": "{{contact.traits.name}}",
-//   "dob_day": "{{contact.traits.user_birth_day}}",
-//   "dob_month": "{{contact.traits.user_birth_month}}",
-//   "dob_year": "{{contact.traits.user_birth_year}}",
-//   "birth_time": "{{contact.traits.user_birth_time}}",
-//   "birth_place": "{{contact.traits.user_birth_place}}",
-//   "plan": "{{contact.traits.getpredection}}"
+//   "n":  "{{contact.name}}",
+//   "d":  "{{contact.dob}}",
+//   "bp": "{{contact.user_birth_place}}",
+//   "t":  "{{contact.user_birth_time}}",
+//   "tp": "{{contact.getpredection}}",
+//   "cc": "{{contact.country_code}}",
+//   "ph": "{{contact.phone_number_nocode}}",
+//   "pf": "{{contact.phone_full}}"
 // }
 // ─────────────────────────────────────────────────────────────────────
 app.post("/webhook-returning", async (req, res) => {
   try {
     const b = req.body;
 
-    addLog("RETURNING_RECEIVED", { phone: b.phone, name: b.name, plan: b.plan });
-    await logEvent("returning_received", b.phone, b.name, b.plan, "returning_received", b);
+    // ── Map short keys to readable names ─────────────────────────────
+    const fullPhone  = (b.pf || "").toString().trim();
+    const name       = b.n  || null;
+    const dob        = b.d  || null;
+    const birthPlace = b.bp || null;
+    const birthTime  = b.t  || null;
+    const planType   = b.tp || null;
+    const countryCode= b.cc || null;
+    const phoneNoCode= b.ph || null;
 
-    const fullPhone  = (b.phone || "").toString().trim();
-    const name       = b.name        || null;
-    const birthDay   = b.dob_day     || null;
-    const birthMonth = b.dob_month   || null;
-    const birthYear  = b.dob_year    || null;
-    const birthTime  = b.birth_time  || null;
-    const birthPlace = b.birth_place || null;
-    const planType   = b.plan        || null;
+    addLog("RETURNING_RECEIVED", {
+      phone_full: fullPhone,
+      name, dob, birthPlace, birthTime, planType,
+      country_code: countryCode
+    });
 
-    const dob = (birthDay && birthMonth && birthYear)
-      ? `${birthDay} ${birthMonth} ${birthYear}`
-      : null;
+    await logEvent("returning_received", fullPhone, name, planType, "returning_received", b);
 
-    const { countryCode, phoneNumber } = splitPhone(fullPhone);
-
+    // ── Basic validation ──────────────────────────────────────────────
     if (!fullPhone) {
-      addLog("RETURNING_ERROR", { reason: "missing phone" });
+      addLog("RETURNING_ERROR", { reason: "missing phone (pf)" });
       return res.status(400).json({ status: "error", reason: "missing phone" });
     }
 
@@ -344,11 +338,20 @@ app.post("/webhook-returning", async (req, res) => {
       return res.json({ status: "invalid_plan", planType });
     }
 
-    // ── Fall back to DB if any trait missing ──────────────────────────
+    // ── Fall back to DB if any trait is missing ───────────────────────
     let finalName       = name;
     let finalDob        = dob;
     let finalBirthTime  = birthTime;
     let finalBirthPlace = birthPlace;
+    let finalCountryCode = countryCode;
+    let finalPhoneNoCode = phoneNoCode;
+
+    // Derive country code from fullPhone if not provided
+    if (!finalCountryCode || !finalPhoneNoCode) {
+      const split = splitPhone(fullPhone);
+      finalCountryCode = finalCountryCode || split.countryCode;
+      finalPhoneNoCode = finalPhoneNoCode || split.phoneNumber;
+    }
 
     if (!finalName || !finalDob || !finalBirthTime || !finalBirthPlace) {
       try {
@@ -368,11 +371,19 @@ app.post("/webhook-returning", async (req, res) => {
               birthPlace: !birthPlace && !!u.birth_place
             }
           });
+        } else {
+          addLog("RETURNING_DB_FILL", { phone: fullPhone, filled: false, source: "no existing user" });
         }
       } catch (err) {
         addLog("RETURNING_DB_FILL_ERROR", { message: err.message });
       }
     }
+
+    addLog("RETURNING_FINAL_FIELDS", {
+      name: finalName, dob: finalDob,
+      birthTime: finalBirthTime, birthPlace: finalBirthPlace,
+      planType, phone_full: fullPhone
+    });
 
     // ── Final validation ──────────────────────────────────────────────
     if (!finalName || !finalDob || !finalBirthTime || !finalBirthPlace) {
@@ -391,17 +402,28 @@ app.post("/webhook-returning", async (req, res) => {
       return res.json({ status: "no_make_url", planType });
     }
 
-    // ── Save + Send ───────────────────────────────────────────────────
+    // ── Save to DB ────────────────────────────────────────────────────
     await saveToDB({
-      phone: fullPhone, name: finalName, dob: finalDob,
-      birth_time: finalBirthTime, birth_place: finalBirthPlace,
-      plan_type: planType, country_code: countryCode, phone_nocode: phoneNumber
+      phone:        fullPhone,
+      name:         finalName,
+      dob:          finalDob,
+      birth_time:   finalBirthTime,
+      birth_place:  finalBirthPlace,
+      plan_type:    planType,
+      country_code: finalCountryCode,
+      phone_nocode: finalPhoneNoCode
     });
 
+    // ── Send to Make.com ──────────────────────────────────────────────
     const r = await axios.post(makeUrl, {
-      phone_full: fullPhone, phone_number: phoneNumber, country_code: countryCode,
-      name: finalName, dob: finalDob, birth_time: finalBirthTime,
-      birth_place: finalBirthPlace, plan_type: planType
+      phone_full:   fullPhone,
+      phone_number: finalPhoneNoCode,
+      country_code: finalCountryCode,
+      name:         finalName,
+      dob:          finalDob,
+      birth_time:   finalBirthTime,
+      birth_place:  finalBirthPlace,
+      plan_type:    planType
     }, { headers: { "Content-Type": "application/json" } });
 
     addLog("RETURNING_SENT_TO_MAKE", { plan: planType, phone_full: fullPhone, status: r.status });
@@ -581,12 +603,11 @@ app.get("/", (req, res) => {
   <div class="env-bar">${envBar}</div>
   <div class="flow-box">
     <b>New users</b>       → POST /webhook (Interakt workflow_response_update) ✅<br>
-    <b>Returning users</b> → POST /webhook-returning (Interakt sends all traits) ✅<br>
-    <b>DOB</b>             → built from day + month + year ✅<br>
-    <b>Entry button</b>    → "Lets Start" ignored gracefully ✅<br>
+    <b>Returning users</b> → POST /webhook-returning (short key body) ✅<br>
+    <b>Short keys</b>      → n=name | d=dob | bp=birth_place | t=birth_time | tp=plan | cc=country_code | ph=phone_nocode | pf=phone_full ✅<br>
     <b>DB fallback</b>     → both endpoints fall back to PostgreSQL if traits missing ✅<br>
+    <b>Entry button</b>    → "Lets Start" ignored gracefully ✅<br>
     <b>Routing</b>         → Prediction→S1 | Ask→S3 | Consult→S4 ✅<br>
-    <b>Make keys</b>       → phone_full + phone_number + country_code ✅<br>
     <b>DB</b>              → PostgreSQL upsert on phone ✅
   </div>
   <table>
