@@ -30,10 +30,9 @@ async function initDB() {
       raw_payload JSONB
     )
   `);
-  
-  // Add plan_type column if it doesn't exist
+
   await pool.query(`
-    ALTER TABLE webhook_events 
+    ALTER TABLE webhook_events
     ADD COLUMN IF NOT EXISTS plan_type VARCHAR(50)
   `);
 
@@ -146,6 +145,13 @@ function getMakeUrl(planType) {
   return null;
 }
 
+// ── Check if planType is a valid routable plan ────────────────────────
+function isValidPlan(planType) {
+  if (!planType) return false;
+  const p = planType.toLowerCase().trim();
+  return p === "prediction" || p === "ask" || p === "consult";
+}
+
 // ─────────────────────────────────────────────────────────────────────
 // POST /webhook
 // ─────────────────────────────────────────────────────────────────────
@@ -170,7 +176,7 @@ app.post("/webhook", async (req, res) => {
     const fullPhone = data.customer_number || "";
     const dataArray = data.data || [];
 
-    // ── Extract all fields ────────────────────────────────────────────
+    // ── Extract all fields from webhook payload ───────────────────────
     const name       = extractField(dataArray, "name");
     const birthDay   = extractField(dataArray, "user_birth_day");
     const birthMonth = extractField(dataArray, "user_birth_month");
@@ -194,43 +200,108 @@ app.post("/webhook", async (req, res) => {
       country_code: countryCode
     });
 
+    // ── If planType is not a valid plan (e.g. "Lets Start"), ignore ───
+    // This is the entry-point button tap before user selects a real plan.
+    // For returning users, Interakt fires this first — we wait for the
+    // real plan selection (prediction / ask / consult) to arrive.
+    if (planType && !isValidPlan(planType)) {
+      addLog("ENTRY_BUTTON", {
+        reason: "planType is an entry/nav button, not a routable plan",
+        planType,
+        phone: fullPhone
+      });
+      await logEvent("entry_button", fullPhone, name, planType, "entry_button", body);
+      return res.json({ status: "entry_button", planType });
+    }
+
+    // ── Returning user: fill missing fields from DB ───────────────────
+    // For returning users Interakt skips the data-collection questions
+    // and only sends the plan selection. We hydrate the missing fields
+    // from our users table.
+    let finalName       = name;
+    let finalDob        = dob;
+    let finalBirthTime  = birthTime;
+    let finalBirthPlace = birthPlace;
+    let finalPlanType   = planType;
+
+    if (fullPhone && (!name || !dob || !birthPlace || !birthTime)) {
+      try {
+        const existing = await pool.query(
+          `SELECT * FROM users WHERE phone = $1`, [fullPhone]
+        );
+        if (existing.rows.length > 0) {
+          const u = existing.rows[0];
+          finalName       = name       || u.name;
+          finalDob        = dob        || u.dob;
+          finalBirthTime  = birthTime  || u.birth_time;
+          finalBirthPlace = birthPlace || u.birth_place;
+          // Always use planType from the current webhook (fresh order),
+          // never restore old plan from DB
+          addLog("DB_FILL", {
+            phone: fullPhone,
+            filled: {
+              name:       !name       && !!u.name,
+              dob:        !dob        && !!u.dob,
+              birthTime:  !birthTime  && !!u.birth_time,
+              birthPlace: !birthPlace && !!u.birth_place
+            },
+            source: "existing user lookup"
+          });
+        } else {
+          addLog("DB_FILL", {
+            phone: fullPhone,
+            filled: false,
+            source: "no existing user found"
+          });
+        }
+      } catch (err) {
+        addLog("DB_FILL_ERROR", { message: err.message });
+      }
+    }
+
+    addLog("FINAL_FIELDS", {
+      name: finalName,
+      dob: finalDob,
+      birthTime: finalBirthTime,
+      birthPlace: finalBirthPlace,
+      planType: finalPlanType,
+      phone_full: fullPhone
+    });
+
     // ── Validate ──────────────────────────────────────────────────────
-    const allFieldsPresent = name && dob && birthPlace && birthTime && planType;
+    const allFieldsPresent = finalName && finalDob && finalBirthPlace && finalBirthTime && finalPlanType;
 
     if (!allFieldsPresent) {
       addLog("WAITING", {
         reason: "Not all fields collected yet",
         collected: {
-          name:       !!name,
-          birthDay:   !!birthDay,
-          birthMonth: !!birthMonth,
-          birthYear:  !!birthYear,
-          dob:        !!dob,
-          birthPlace: !!birthPlace,
-          tob:        !!birthTime,
-          topic:      !!planType
+          name:       !!finalName,
+          dob:        !!finalDob,
+          birthPlace: !!finalBirthPlace,
+          birthTime:  !!finalBirthTime,
+          planType:   !!finalPlanType
         }
       });
-      await logEvent("waiting", fullPhone, name, planType, "waiting", body);
+      await logEvent("waiting", fullPhone, finalName, finalPlanType, "waiting", body);
       return res.json({ status: "waiting" });
     }
 
     // ── Route ─────────────────────────────────────────────────────────
-    const makeUrl = getMakeUrl(planType);
+    const makeUrl = getMakeUrl(finalPlanType);
     if (!makeUrl) {
-      addLog("UNKNOWN_PLAN", { planType });
-      await logEvent("unknown_plan", fullPhone, name, planType, "unknown_plan", body);
-      return res.json({ status: "unknown_plan", planType });
+      addLog("UNKNOWN_PLAN", { planType: finalPlanType });
+      await logEvent("unknown_plan", fullPhone, finalName, finalPlanType, "unknown_plan", body);
+      return res.json({ status: "unknown_plan", planType: finalPlanType });
     }
 
     // ── Save to DB ────────────────────────────────────────────────────
     await saveToDB({
       phone:        fullPhone,
-      name,
-      dob,
-      birth_time:   birthTime,
-      birth_place:  birthPlace,
-      plan_type:    planType,
+      name:         finalName,
+      dob:          finalDob,
+      birth_time:   finalBirthTime,
+      birth_place:  finalBirthPlace,
+      plan_type:    finalPlanType,
       country_code: countryCode,
       phone_nocode: phoneNumber
     });
@@ -240,21 +311,26 @@ app.post("/webhook", async (req, res) => {
       phone_full:   fullPhone,
       phone_number: phoneNumber,
       country_code: countryCode,
-      name,
-      dob,
-      birth_time:   birthTime,
-      birth_place:  birthPlace,
-      plan_type:    planType
+      name:         finalName,
+      dob:          finalDob,
+      birth_time:   finalBirthTime,
+      birth_place:  finalBirthPlace,
+      plan_type:    finalPlanType
     };
 
     const r = await axios.post(makeUrl, makePayload, {
       headers: { "Content-Type": "application/json" }
     });
 
-    addLog("SENT_TO_MAKE", { plan: planType, phone_full: fullPhone, phone_number: phoneNumber, status: r.status });
-    await logEvent("forwarded", fullPhone, name, planType, `forwarded_${planType.toLowerCase()}`, body);
+    addLog("SENT_TO_MAKE", {
+      plan: finalPlanType,
+      phone_full: fullPhone,
+      phone_number: phoneNumber,
+      status: r.status
+    });
+    await logEvent("forwarded", fullPhone, finalName, finalPlanType, `forwarded_${finalPlanType.toLowerCase()}`, body);
 
-    return res.json({ status: "ok", plan: planType });
+    return res.json({ status: "ok", plan: finalPlanType });
 
   } catch (err) {
     addLog("ERROR", { message: err.message });
@@ -278,7 +354,8 @@ app.get("/dashboard", async (req, res) => {
         COUNT(*) FILTER (WHERE plan_type = 'Ask')        AS ask,
         COUNT(*) FILTER (WHERE plan_type = 'Consult')    AS consult,
         COUNT(*) FILTER (WHERE status = 'waiting')       AS waiting,
-        COUNT(*) FILTER (WHERE status = 'unknown_plan')  AS unknown
+        COUNT(*) FILTER (WHERE status = 'unknown_plan')  AS unknown,
+        COUNT(*) FILTER (WHERE status = 'entry_button')  AS entry_button
       FROM webhook_events
     `);
 
@@ -293,6 +370,7 @@ app.get("/dashboard", async (req, res) => {
         <td><span class="badge ${
           r.status?.includes("forwarded") ? "success" :
           r.status === "waiting"          ? "waiting" :
+          r.status === "entry_button"     ? "info"    :
           r.status === "unknown_plan"     ? "error"   : "info"
         }">${r.status}</span></td>
       </tr>`).join("");
@@ -317,6 +395,7 @@ app.get("/dashboard", async (req, res) => {
     .stat.red .num { color: #fca5a5; }
     .stat.blue .num { color: #93c5fd; }
     .stat.orange .num { color: #fdba74; }
+    .stat.teal .num { color: #5eead4; }
     table { width: 100%; border-collapse: collapse; font-size: 13px; }
     th { text-align: left; padding: 10px 12px; background: #1a1a2e; color: #a78bfa; font-weight: 600; }
     td { padding: 10px 12px; border-bottom: 1px solid #1e1e2e; vertical-align: top; }
@@ -342,6 +421,7 @@ app.get("/dashboard", async (req, res) => {
     <div class="stat blue"><div class="num">${s.prediction}</div><div class="label">Predictions</div></div>
     <div class="stat orange"><div class="num">${s.ask}</div><div class="label">Ask Astrologer</div></div>
     <div class="stat yellow"><div class="num">${s.consult}</div><div class="label">Consultations</div></div>
+    <div class="stat teal"><div class="num">${s.entry_button}</div><div class="label">Entry Taps</div></div>
     <div class="stat red"><div class="num">${s.unknown}</div><div class="label">Unknown Plan</div></div>
   </div>
   <h2>📥 All Webhook Events</h2>
@@ -375,8 +455,10 @@ app.get("/", (req, res) => {
     <tr>
       <td>${log.time}</td>
       <td><span class="badge ${
-        log.type.includes("ERROR")   ? "error"   :
-        log.type.includes("SENT")    ? "success" :
+        log.type.includes("ERROR")        ? "error"   :
+        log.type.includes("SENT")         ? "success" :
+        log.type.includes("DB_FILL")      ? "dbfill"  :
+        log.type.includes("ENTRY_BUTTON") ? "info"    :
         log.type.includes("WAITING") || log.type.includes("UNKNOWN") ? "waiting" : "info"
       }">${log.type}</span></td>
       <td><pre>${JSON.stringify(log.data, null, 2)}</pre></td>
@@ -385,7 +467,7 @@ app.get("/", (req, res) => {
   res.send(`<!DOCTYPE html>
 <html>
 <head>
-  <title>Astro Middleware v15</title>
+  <title>Astro Middleware v16</title>
   <meta http-equiv="refresh" content="5">
   <style>
     body { font-family: monospace; background: #0f0f0f; color: #e0e0e0; padding: 20px; }
@@ -403,11 +485,12 @@ app.get("/", (req, res) => {
     .success { background: #14532d; color: #86efac; }
     .waiting { background: #78350f; color: #fcd34d; }
     .info    { background: #1e3a5f; color: #93c5fd; }
+    .dbfill  { background: #1a3a2e; color: #6ee7b7; }
     .status  { color: #86efac; font-size: 13px; margin-bottom: 12px; }
   </style>
 </head>
 <body>
-  <h1>🔮 Astro Middleware v15</h1>
+  <h1>🔮 Astro Middleware v16</h1>
   <p class="status">✅ Running — auto-refresh 5s | 🕐 Dubai Time (UTC+4) | ${logs.length} events</p>
   <div class="nav" style="margin-bottom:12px">
     <a href="/dashboard">📊 Dashboard</a>
@@ -415,11 +498,13 @@ app.get("/", (req, res) => {
   </div>
   <div class="env-bar">${envBar}</div>
   <div class="flow-box">
-    <b>Fields</b>    → name, day, month, year, time, place, plan from data.data array ✅<br>
-    <b>DOB</b>       → built from day + month + year ✅<br>
-    <b>Routing</b>   → Prediction→S1 | Ask→S3 | Consult→S4 ✅<br>
-    <b>Make keys</b> → phone_full + phone_number + country_code ✅<br>
-    <b>DB</b>        → PostgreSQL upsert on phone ✅
+    <b>Fields</b>       → name, day, month, year, time, place, plan from data.data array ✅<br>
+    <b>DOB</b>          → built from day + month + year ✅<br>
+    <b>Entry button</b> → "Lets Start" and non-plan values ignored gracefully ✅<br>
+    <b>Returning user</b> → missing fields hydrated from PostgreSQL users table ✅<br>
+    <b>Routing</b>      → Prediction→S1 | Ask→S3 | Consult→S4 ✅<br>
+    <b>Make keys</b>    → phone_full + phone_number + country_code ✅<br>
+    <b>DB</b>           → PostgreSQL upsert on phone ✅
   </div>
   <table>
     <thead><tr><th>Time (Dubai)</th><th>Type</th><th>Data</th></tr></thead>
@@ -432,7 +517,7 @@ app.get("/", (req, res) => {
 // ── Boot ──────────────────────────────────────────────────────────────
 initDB().then(() => {
   app.listen(PORT, () => {
-    console.log(`🚀 Astro middleware v15 running on port ${PORT}`);
+    console.log(`🚀 Astro middleware v16 running on port ${PORT}`);
   });
 }).catch(err => {
   console.error("❌ DB init failed:", err.message);
