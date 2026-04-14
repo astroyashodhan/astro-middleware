@@ -1,8 +1,8 @@
 const axios = require("axios");
 const { Pool } = require("pg");
 
-const INTERAKT_API_KEY = "your_interakt_api_key_here"; // Base64 encoded
-const DATABASE_URL = "your_railway_postgres_url_here";
+const INTERAKT_API_KEY = process.env.INTERAKT_API_KEY;
+const DATABASE_URL = process.env.DATABASE_URL;
 
 const pool = new Pool({
   connectionString: DATABASE_URL,
@@ -31,7 +31,7 @@ function splitPhone(fullPhone) {
 async function fetchAllContacts() {
   let page = 1;
   let allContacts = [];
-  
+
   while (true) {
     console.log(`Fetching page ${page}...`);
     const response = await axios.get("https://api.interakt.ai/v1/public/apis/contacts/", {
@@ -51,7 +51,7 @@ async function fetchAllContacts() {
     allContacts = allContacts.concat(contacts);
     console.log(`Got ${contacts.length} contacts (total: ${allContacts.length})`);
 
-    if (contacts.length < 100) break; // last page
+    if (contacts.length < 100) break;
     page++;
   }
 
@@ -68,8 +68,7 @@ async function migrateContacts() {
   for (const contact of contacts) {
     const traits = contact.traits || {};
     const phoneRaw = contact.phone_number || "";
-    
-    // Interakt stores phone without + sometimes, normalize it
+
     const fullPhone = phoneRaw.startsWith("+") ? phoneRaw : `+${phoneRaw}`;
 
     const name       = traits.name || contact.name || null;
@@ -83,8 +82,8 @@ async function migrateContacts() {
       ? `${birthDay} ${birthMonth} ${birthYear}`
       : null;
 
-    // Skip contacts with no useful birth data
     if (!name && !dob) {
+      console.log(`⏭ Skipping ${fullPhone} — no useful data`);
       skipped++;
       continue;
     }
