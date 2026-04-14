@@ -152,136 +152,261 @@ function isValidPlan(planType) {
   return p === "prediction" || p === "ask" || p === "consult";
 }
 
+// ── Normalize plan type from various button labels ────────────────────
+function normalizePlan(val) {
+  if (!val) return null;
+  const v = val.toLowerCase().trim();
+  if (v === "prediction" || v === "get today prediction" || v === "get prediction") return "Prediction";
+  if (v === "ask" || v === "ask a question" || v === "ask question")                return "Ask";
+  if (v === "consult" || v === "book 15 min call" || v === "book a call")           return "Consult";
+  return null;
+}
+
 // ─────────────────────────────────────────────────────────────────────
-// POST /webhook  (new users — standard Interakt workflow_response_update)
+// POST /webhook  — handles BOTH new and returning users
+//
+// New users:      Interakt sends full workflow_response_update
+// Returning users: Interakt sends short key body:
+//   { n, d, bp, t, tp, cc, ph, pf }
 // ─────────────────────────────────────────────────────────────────────
 app.post("/webhook", async (req, res) => {
   try {
     const body = req.body;
 
-    addLog("RECEIVED_RAW", {
-      type: body.type,
-      customer: body.data?.customer_name,
-      phone: body.data?.customer_number
-    });
+    // ── Detect if this is a returning user short-key payload ──────────
+    // Returning user body has "pf" (phone_full) as a top-level key
+    const isReturningUser = !!(body.pf || body.n || body.tp);
 
-    await logEvent("received", body.data?.customer_number, body.data?.customer_name, null, "received", body);
-
-    if (body.type !== "workflow_response_update") {
-      addLog("IGNORED", { type: body.type });
-      return res.json({ status: "ignored" });
-    }
-
-    const data      = body.data || {};
-    const fullPhone = data.customer_number || "";
-    const dataArray = data.data || [];
-
-    const name       = extractField(dataArray, "name");
-    const birthDay   = extractField(dataArray, "user_birth_day");
-    const birthMonth = extractField(dataArray, "user_birth_month");
-    const birthYear  = extractField(dataArray, "user_birth_year");
-    const birthTime  = extractField(dataArray, "user_birth_time");
-    const birthPlace = extractField(dataArray, "user_birth_place");
-    const planType   = extractField(dataArray, "getpredection");
-
-    const dob = (birthDay && birthMonth && birthYear)
-      ? `${birthDay} ${birthMonth} ${birthYear}`
-      : null;
-
-    const { countryCode, phoneNumber } = splitPhone(fullPhone);
-
-    addLog("EXTRACTED", {
-      name, birthDay, birthMonth, birthYear,
-      dob, birthTime, birthPlace, planType,
-      phone_full: fullPhone,
-      phone_number: phoneNumber,
-      country_code: countryCode
-    });
-
-    // ── Entry button guard ────────────────────────────────────────────
-    if (planType && !isValidPlan(planType)) {
-      addLog("ENTRY_BUTTON", { reason: "not a routable plan", planType, phone: fullPhone });
-      await logEvent("entry_button", fullPhone, name, planType, "entry_button", body);
-      return res.json({ status: "entry_button", planType });
-    }
-
-    // ── Returning user: fill missing fields from DB ───────────────────
-    let finalName       = name;
-    let finalDob        = dob;
-    let finalBirthTime  = birthTime;
-    let finalBirthPlace = birthPlace;
-    let finalPlanType   = planType;
-
-    if (fullPhone && (!name || !dob || !birthPlace || !birthTime)) {
-      try {
-        const existing = await pool.query(`SELECT * FROM users WHERE phone = $1`, [fullPhone]);
-        if (existing.rows.length > 0) {
-          const u = existing.rows[0];
-          finalName       = name       || u.name;
-          finalDob        = dob        || u.dob;
-          finalBirthTime  = birthTime  || u.birth_time;
-          finalBirthPlace = birthPlace || u.birth_place;
-          addLog("DB_FILL", {
-            phone: fullPhone,
-            filled: {
-              name:       !name       && !!u.name,
-              dob:        !dob        && !!u.dob,
-              birthTime:  !birthTime  && !!u.birth_time,
-              birthPlace: !birthPlace && !!u.birth_place
-            },
-            source: "existing user lookup"
-          });
-        } else {
-          addLog("DB_FILL", { phone: fullPhone, filled: false, source: "no existing user found" });
-        }
-      } catch (err) {
-        addLog("DB_FILL_ERROR", { message: err.message });
-      }
-    }
-
-    addLog("FINAL_FIELDS", {
-      name: finalName, dob: finalDob,
-      birthTime: finalBirthTime, birthPlace: finalBirthPlace,
-      planType: finalPlanType, phone_full: fullPhone
-    });
-
-    const allFieldsPresent = finalName && finalDob && finalBirthPlace && finalBirthTime && finalPlanType;
-
-    if (!allFieldsPresent) {
-      addLog("WAITING", {
-        reason: "Not all fields collected yet",
-        collected: {
-          name: !!finalName, dob: !!finalDob,
-          birthPlace: !!finalBirthPlace, birthTime: !!finalBirthTime, planType: !!finalPlanType
-        }
+    if (isReturningUser) {
+      // ── RETURNING USER FLOW ─────────────────────────────────────────
+      addLog("RETURNING_RECEIVED", {
+        phone: body.pf, name: body.n, plan: body.tp
       });
-      await logEvent("waiting", fullPhone, finalName, finalPlanType, "waiting", body);
-      return res.json({ status: "waiting" });
+
+      const fullPhone  = (body.pf || "").toString().trim();
+      const name       = body.n  || null;
+      const dob        = body.d  || null;
+      const birthPlace = body.bp || null;
+      const birthTime  = body.t  || null;
+      const planType   = normalizePlan(body.tp) || body.tp || null;
+      const countryCode= body.cc || null;
+      const phoneNoCode= body.ph || null;
+
+      const { countryCode: splitCC, phoneNumber: splitPN } = splitPhone(fullPhone);
+      const finalCC = countryCode || splitCC;
+      const finalPN = phoneNoCode || splitPN;
+
+      await logEvent("returning_received", fullPhone, name, planType, "returning_received", body);
+
+      if (!fullPhone) {
+        addLog("RETURNING_ERROR", { reason: "missing phone" });
+        return res.status(400).json({ status: "error", reason: "missing phone" });
+      }
+
+      if (!isValidPlan(planType)) {
+        addLog("RETURNING_INVALID_PLAN", { planType });
+        await logEvent("returning_invalid_plan", fullPhone, name, planType, "invalid_plan", body);
+        return res.json({ status: "invalid_plan", planType });
+      }
+
+      // ── Fall back to DB if traits missing ───────────────────────────
+      let finalName       = name;
+      let finalDob        = dob;
+      let finalBirthTime  = birthTime;
+      let finalBirthPlace = birthPlace;
+
+      if (!finalName || !finalDob || !finalBirthTime || !finalBirthPlace) {
+        try {
+          const existing = await pool.query(`SELECT * FROM users WHERE phone = $1`, [fullPhone]);
+          if (existing.rows.length > 0) {
+            const u = existing.rows[0];
+            finalName       = finalName       || u.name;
+            finalDob        = finalDob        || u.dob;
+            finalBirthTime  = finalBirthTime  || u.birth_time;
+            finalBirthPlace = finalBirthPlace || u.birth_place;
+            addLog("RETURNING_DB_FILL", {
+              phone: fullPhone,
+              filled: {
+                name:       !name       && !!u.name,
+                dob:        !dob        && !!u.dob,
+                birthTime:  !birthTime  && !!u.birth_time,
+                birthPlace: !birthPlace && !!u.birth_place
+              }
+            });
+          } else {
+            addLog("RETURNING_DB_FILL", { phone: fullPhone, filled: false });
+          }
+        } catch (err) {
+          addLog("RETURNING_DB_FILL_ERROR", { message: err.message });
+        }
+      }
+
+      addLog("RETURNING_FINAL", {
+        name: finalName, dob: finalDob,
+        birthTime: finalBirthTime, birthPlace: finalBirthPlace,
+        planType, phone: fullPhone
+      });
+
+      if (!finalName || !finalDob || !finalBirthTime || !finalBirthPlace) {
+        addLog("RETURNING_WAITING", {
+          name: !!finalName, dob: !!finalDob,
+          birthTime: !!finalBirthTime, birthPlace: !!finalBirthPlace
+        });
+        await logEvent("returning_waiting", fullPhone, finalName, planType, "waiting", body);
+        return res.json({ status: "waiting", reason: "incomplete user data" });
+      }
+
+      const makeUrl = getMakeUrl(planType);
+      if (!makeUrl) {
+        addLog("RETURNING_NO_MAKE_URL", { planType });
+        return res.json({ status: "no_make_url", planType });
+      }
+
+      await saveToDB({
+        phone: fullPhone, name: finalName, dob: finalDob,
+        birth_time: finalBirthTime, birth_place: finalBirthPlace,
+        plan_type: planType, country_code: finalCC, phone_nocode: finalPN
+      });
+
+      const r = await axios.post(makeUrl, {
+        phone_full: fullPhone, phone_number: finalPN, country_code: finalCC,
+        name: finalName, dob: finalDob, birth_time: finalBirthTime,
+        birth_place: finalBirthPlace, plan_type: planType
+      }, { headers: { "Content-Type": "application/json" } });
+
+      addLog("RETURNING_SENT_TO_MAKE", { plan: planType, phone: fullPhone, status: r.status });
+      await logEvent("forwarded", fullPhone, finalName, planType, `forwarded_${planType.toLowerCase()}`, body);
+
+      return res.json({ status: "ok", plan: planType });
+
+    } else {
+      // ── NEW USER FLOW ───────────────────────────────────────────────
+      addLog("RECEIVED_RAW", {
+        type: body.type,
+        customer: body.data?.customer_name,
+        phone: body.data?.customer_number
+      });
+
+      await logEvent("received", body.data?.customer_number, body.data?.customer_name, null, "received", body);
+
+      if (body.type !== "workflow_response_update") {
+        addLog("IGNORED", { type: body.type });
+        return res.json({ status: "ignored" });
+      }
+
+      const data      = body.data || {};
+      const fullPhone = data.customer_number || "";
+      const dataArray = data.data || [];
+
+      // ── Extract fields from workflow response array ────────────────
+      const name       = extractField(dataArray, "name");
+      const birthDay   = extractField(dataArray, "user_birth_day");
+      const birthMonth = extractField(dataArray, "user_birth_month");
+      const birthYear  = extractField(dataArray, "user_birth_year");
+      const birthTime  = extractField(dataArray, "user_birth_time");
+      const birthPlace = extractField(dataArray, "user_birth_place");
+      const planType   = extractField(dataArray, "getpredection");
+
+      const dob = (birthDay && birthMonth && birthYear)
+        ? `${birthDay} ${birthMonth} ${birthYear}`
+        : null;
+
+      const { countryCode, phoneNumber } = splitPhone(fullPhone);
+
+      addLog("EXTRACTED", {
+        name, birthDay, birthMonth, birthYear,
+        dob, birthTime, birthPlace, planType,
+        phone_full: fullPhone,
+        phone_number: phoneNumber,
+        country_code: countryCode
+      });
+
+      // ── Entry button guard ──────────────────────────────────────────
+      if (planType && !isValidPlan(planType)) {
+        addLog("ENTRY_BUTTON", { reason: "not a routable plan", planType, phone: fullPhone });
+        await logEvent("entry_button", fullPhone, name, planType, "entry_button", body);
+        return res.json({ status: "entry_button", planType });
+      }
+
+      // ── DB fallback for returning users on main webhook ─────────────
+      let finalName       = name;
+      let finalDob        = dob;
+      let finalBirthTime  = birthTime;
+      let finalBirthPlace = birthPlace;
+      let finalPlanType   = planType;
+
+      if (fullPhone && (!name || !dob || !birthPlace || !birthTime)) {
+        try {
+          const existing = await pool.query(`SELECT * FROM users WHERE phone = $1`, [fullPhone]);
+          if (existing.rows.length > 0) {
+            const u = existing.rows[0];
+            finalName       = name       || u.name;
+            finalDob        = dob        || u.dob;
+            finalBirthTime  = birthTime  || u.birth_time;
+            finalBirthPlace = birthPlace || u.birth_place;
+            addLog("DB_FILL", {
+              phone: fullPhone,
+              filled: {
+                name:       !name       && !!u.name,
+                dob:        !dob        && !!u.dob,
+                birthTime:  !birthTime  && !!u.birth_time,
+                birthPlace: !birthPlace && !!u.birth_place
+              },
+              source: "existing user lookup"
+            });
+          } else {
+            addLog("DB_FILL", { phone: fullPhone, filled: false, source: "no existing user found" });
+          }
+        } catch (err) {
+          addLog("DB_FILL_ERROR", { message: err.message });
+        }
+      }
+
+      addLog("FINAL_FIELDS", {
+        name: finalName, dob: finalDob,
+        birthTime: finalBirthTime, birthPlace: finalBirthPlace,
+        planType: finalPlanType, phone_full: fullPhone
+      });
+
+      const allFieldsPresent = finalName && finalDob && finalBirthPlace && finalBirthTime && finalPlanType;
+
+      if (!allFieldsPresent) {
+        addLog("WAITING", {
+          reason: "Not all fields collected yet",
+          collected: {
+            name: !!finalName, dob: !!finalDob,
+            birthPlace: !!finalBirthPlace, birthTime: !!finalBirthTime,
+            planType: !!finalPlanType
+          }
+        });
+        await logEvent("waiting", fullPhone, finalName, finalPlanType, "waiting", body);
+        return res.json({ status: "waiting" });
+      }
+
+      const makeUrl = getMakeUrl(finalPlanType);
+      if (!makeUrl) {
+        addLog("UNKNOWN_PLAN", { planType: finalPlanType });
+        await logEvent("unknown_plan", fullPhone, finalName, finalPlanType, "unknown_plan", body);
+        return res.json({ status: "unknown_plan", planType: finalPlanType });
+      }
+
+      await saveToDB({
+        phone: fullPhone, name: finalName, dob: finalDob,
+        birth_time: finalBirthTime, birth_place: finalBirthPlace,
+        plan_type: finalPlanType, country_code: countryCode, phone_nocode: phoneNumber
+      });
+
+      const r = await axios.post(makeUrl, {
+        phone_full: fullPhone, phone_number: phoneNumber, country_code: countryCode,
+        name: finalName, dob: finalDob, birth_time: finalBirthTime,
+        birth_place: finalBirthPlace, plan_type: finalPlanType
+      }, { headers: { "Content-Type": "application/json" } });
+
+      addLog("SENT_TO_MAKE", { plan: finalPlanType, phone_full: fullPhone, status: r.status });
+      await logEvent("forwarded", fullPhone, finalName, finalPlanType, `forwarded_${finalPlanType.toLowerCase()}`, body);
+
+      return res.json({ status: "ok", plan: finalPlanType });
     }
-
-    const makeUrl = getMakeUrl(finalPlanType);
-    if (!makeUrl) {
-      addLog("UNKNOWN_PLAN", { planType: finalPlanType });
-      await logEvent("unknown_plan", fullPhone, finalName, finalPlanType, "unknown_plan", body);
-      return res.json({ status: "unknown_plan", planType: finalPlanType });
-    }
-
-    await saveToDB({
-      phone: fullPhone, name: finalName, dob: finalDob,
-      birth_time: finalBirthTime, birth_place: finalBirthPlace,
-      plan_type: finalPlanType, country_code: countryCode, phone_nocode: phoneNumber
-    });
-
-    const r = await axios.post(makeUrl, {
-      phone_full: fullPhone, phone_number: phoneNumber, country_code: countryCode,
-      name: finalName, dob: finalDob, birth_time: finalBirthTime,
-      birth_place: finalBirthPlace, plan_type: finalPlanType
-    }, { headers: { "Content-Type": "application/json" } });
-
-    addLog("SENT_TO_MAKE", { plan: finalPlanType, phone_full: fullPhone, status: r.status });
-    await logEvent("forwarded", fullPhone, finalName, finalPlanType, `forwarded_${finalPlanType.toLowerCase()}`, body);
-
-    return res.json({ status: "ok", plan: finalPlanType });
 
   } catch (err) {
     addLog("ERROR", { message: err.message });
@@ -289,152 +414,10 @@ app.post("/webhook", async (req, res) => {
   }
 });
 
-// ─────────────────────────────────────────────────────────────────────
-// POST /webhook-returning  (returning users)
-//
-// Interakt webhook body (use exactly these keys):
-// {
-//   "n":  "{{contact.name}}",
-//   "d":  "{{contact.dob}}",
-//   "bp": "{{contact.user_birth_place}}",
-//   "t":  "{{contact.user_birth_time}}",
-//   "tp": "{{contact.getpredection}}",
-//   "cc": "{{contact.country_code}}",
-//   "ph": "{{contact.phone_number_nocode}}",
-//   "pf": "{{contact.phone_full}}"
-// }
-// ─────────────────────────────────────────────────────────────────────
+// ── Keep /webhook-returning as alias pointing to same logic ───────────
 app.post("/webhook-returning", async (req, res) => {
-  try {
-    const b = req.body;
-
-    // ── Map short keys to readable names ─────────────────────────────
-    const fullPhone  = (b.pf || "").toString().trim();
-    const name       = b.n  || null;
-    const dob        = b.d  || null;
-    const birthPlace = b.bp || null;
-    const birthTime  = b.t  || null;
-    const planType   = b.tp || null;
-    const countryCode= b.cc || null;
-    const phoneNoCode= b.ph || null;
-
-    addLog("RETURNING_RECEIVED", {
-      phone_full: fullPhone,
-      name, dob, birthPlace, birthTime, planType,
-      country_code: countryCode
-    });
-
-    await logEvent("returning_received", fullPhone, name, planType, "returning_received", b);
-
-    // ── Basic validation ──────────────────────────────────────────────
-    if (!fullPhone) {
-      addLog("RETURNING_ERROR", { reason: "missing phone (pf)" });
-      return res.status(400).json({ status: "error", reason: "missing phone" });
-    }
-
-    if (!isValidPlan(planType)) {
-      addLog("RETURNING_INVALID_PLAN", { planType });
-      await logEvent("returning_invalid_plan", fullPhone, name, planType, "invalid_plan", b);
-      return res.json({ status: "invalid_plan", planType });
-    }
-
-    // ── Fall back to DB if any trait is missing ───────────────────────
-    let finalName       = name;
-    let finalDob        = dob;
-    let finalBirthTime  = birthTime;
-    let finalBirthPlace = birthPlace;
-    let finalCountryCode = countryCode;
-    let finalPhoneNoCode = phoneNoCode;
-
-    // Derive country code from fullPhone if not provided
-    if (!finalCountryCode || !finalPhoneNoCode) {
-      const split = splitPhone(fullPhone);
-      finalCountryCode = finalCountryCode || split.countryCode;
-      finalPhoneNoCode = finalPhoneNoCode || split.phoneNumber;
-    }
-
-    if (!finalName || !finalDob || !finalBirthTime || !finalBirthPlace) {
-      try {
-        const existing = await pool.query(`SELECT * FROM users WHERE phone = $1`, [fullPhone]);
-        if (existing.rows.length > 0) {
-          const u = existing.rows[0];
-          finalName       = finalName       || u.name;
-          finalDob        = finalDob        || u.dob;
-          finalBirthTime  = finalBirthTime  || u.birth_time;
-          finalBirthPlace = finalBirthPlace || u.birth_place;
-          addLog("RETURNING_DB_FILL", {
-            phone: fullPhone,
-            filled: {
-              name:       !name       && !!u.name,
-              dob:        !dob        && !!u.dob,
-              birthTime:  !birthTime  && !!u.birth_time,
-              birthPlace: !birthPlace && !!u.birth_place
-            }
-          });
-        } else {
-          addLog("RETURNING_DB_FILL", { phone: fullPhone, filled: false, source: "no existing user" });
-        }
-      } catch (err) {
-        addLog("RETURNING_DB_FILL_ERROR", { message: err.message });
-      }
-    }
-
-    addLog("RETURNING_FINAL_FIELDS", {
-      name: finalName, dob: finalDob,
-      birthTime: finalBirthTime, birthPlace: finalBirthPlace,
-      planType, phone_full: fullPhone
-    });
-
-    // ── Final validation ──────────────────────────────────────────────
-    if (!finalName || !finalDob || !finalBirthTime || !finalBirthPlace) {
-      addLog("RETURNING_MISSING_FIELDS", {
-        name: !!finalName, dob: !!finalDob,
-        birthTime: !!finalBirthTime, birthPlace: !!finalBirthPlace
-      });
-      await logEvent("returning_waiting", fullPhone, finalName, planType, "waiting", b);
-      return res.json({ status: "waiting", reason: "incomplete user data" });
-    }
-
-    // ── Route ─────────────────────────────────────────────────────────
-    const makeUrl = getMakeUrl(planType);
-    if (!makeUrl) {
-      addLog("RETURNING_NO_MAKE_URL", { planType });
-      return res.json({ status: "no_make_url", planType });
-    }
-
-    // ── Save to DB ────────────────────────────────────────────────────
-    await saveToDB({
-      phone:        fullPhone,
-      name:         finalName,
-      dob:          finalDob,
-      birth_time:   finalBirthTime,
-      birth_place:  finalBirthPlace,
-      plan_type:    planType,
-      country_code: finalCountryCode,
-      phone_nocode: finalPhoneNoCode
-    });
-
-    // ── Send to Make.com ──────────────────────────────────────────────
-    const r = await axios.post(makeUrl, {
-      phone_full:   fullPhone,
-      phone_number: finalPhoneNoCode,
-      country_code: finalCountryCode,
-      name:         finalName,
-      dob:          finalDob,
-      birth_time:   finalBirthTime,
-      birth_place:  finalBirthPlace,
-      plan_type:    planType
-    }, { headers: { "Content-Type": "application/json" } });
-
-    addLog("RETURNING_SENT_TO_MAKE", { plan: planType, phone_full: fullPhone, status: r.status });
-    await logEvent("forwarded", fullPhone, finalName, planType, `forwarded_${planType.toLowerCase()}`, b);
-
-    return res.json({ status: "ok", plan: planType });
-
-  } catch (err) {
-    addLog("RETURNING_ERROR", { message: err.message });
-    return res.status(500).json({ status: "error", message: err.message });
-  }
+  req.url = "/webhook";
+  app._router.handle(req, res);
 });
 
 // ─────────────────────────────────────────────────────────────────────
@@ -570,7 +553,7 @@ app.get("/", (req, res) => {
   res.send(`<!DOCTYPE html>
 <html>
 <head>
-  <title>Astro Middleware v17</title>
+  <title>Astro Middleware v18</title>
   <meta http-equiv="refresh" content="5">
   <style>
     body { font-family: monospace; background: #0f0f0f; color: #e0e0e0; padding: 20px; }
@@ -594,7 +577,7 @@ app.get("/", (req, res) => {
   </style>
 </head>
 <body>
-  <h1>🔮 Astro Middleware v17</h1>
+  <h1>🔮 Astro Middleware v18</h1>
   <p class="status">✅ Running — auto-refresh 5s | 🕐 Dubai Time (UTC+4) | ${logs.length} events</p>
   <div class="nav" style="margin-bottom:12px">
     <a href="/dashboard">📊 Dashboard</a>
@@ -602,13 +585,14 @@ app.get("/", (req, res) => {
   </div>
   <div class="env-bar">${envBar}</div>
   <div class="flow-box">
-    <b>New users</b>       → POST /webhook (Interakt workflow_response_update) ✅<br>
-    <b>Returning users</b> → POST /webhook-returning (short key body) ✅<br>
-    <b>Short keys</b>      → n=name | d=dob | bp=birth_place | t=birth_time | tp=plan | cc=country_code | ph=phone_nocode | pf=phone_full ✅<br>
-    <b>DB fallback</b>     → both endpoints fall back to PostgreSQL if traits missing ✅<br>
-    <b>Entry button</b>    → "Lets Start" ignored gracefully ✅<br>
-    <b>Routing</b>         → Prediction→S1 | Ask→S3 | Consult→S4 ✅<br>
-    <b>DB</b>              → PostgreSQL upsert on phone ✅
+    <b>Single endpoint</b>  → POST /webhook handles both new and returning users ✅<br>
+    <b>Detection</b>        → if body has "pf" key → returning user flow ✅<br>
+    <b>Short keys</b>       → n=name | d=dob | bp=birth_place | t=birth_time | tp=plan | pf=phone_full ✅<br>
+    <b>Plan normalize</b>   → "Get Today Prediction" → "Prediction" | "Ask a Question" → "Ask" ✅<br>
+    <b>DB fallback</b>      → both flows fall back to PostgreSQL if traits missing ✅<br>
+    <b>Entry button</b>     → "Lets Start" ignored gracefully ✅<br>
+    <b>Routing</b>          → Prediction→S1 | Ask→S3 | Consult→S4 ✅<br>
+    <b>DB</b>               → PostgreSQL upsert on phone ✅
   </div>
   <table>
     <thead><tr><th>Time (Dubai)</th><th>Type</th><th>Data</th></tr></thead>
@@ -621,7 +605,7 @@ app.get("/", (req, res) => {
 // ── Boot ──────────────────────────────────────────────────────────────
 initDB().then(() => {
   app.listen(PORT, () => {
-    console.log(`🚀 Astro middleware v17 running on port ${PORT}`);
+    console.log(`🚀 Astro middleware v18 running on port ${PORT}`);
   });
 }).catch(err => {
   console.error("❌ DB init failed:", err.message);
