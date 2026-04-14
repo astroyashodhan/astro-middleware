@@ -153,9 +153,9 @@ function isValidPlan(planType) {
 function normalizePlan(val) {
   if (!val) return null;
   const v = val.toLowerCase().trim();
-  if (v.includes("predict") || v === "9" || v === "predict_9") return "Prediction";
-  if (v.includes("ask") || v === "19" || v === "predict_19")    return "Ask";
-  if (v.includes("consult") || v.includes("call") || v === "199" || v === "predict_199") return "Consult";
+  if (v.includes("predict") || v === "9" || v === "predict_9" || v === "1") return "Prediction";
+if (v.includes("ask") || v === "19" || v === "predict_19" || v === "2")    return "Ask";
+if (v.includes("consult") || v.includes("call") || v === "139" || v === "3") return "Consult";
   return null;
 }
 
